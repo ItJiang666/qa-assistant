@@ -6,7 +6,7 @@
 
 ---
 
-## 三步快速开始
+## 四步快速开始
 
 ```bash
 # 1) 拉模型（一次性，约 8.5 GB）
@@ -15,7 +15,7 @@ ollama pull qwen3.5:9b && ollama pull qwen3-embedding:4b
 # 2) 生成项目专用的向量模型（一次性，复用上面已拉取的权重，不额外下载）
 #    把向量模型的上下文窗口从自带的 40960 压到 2048：不改这一步，
 #    它会独占约 10 GB 显存并把对话模型挤出去，导致每次提问都要重新加载两个模型
-#    （实测单次问答 7.7 秒 → 改后 0.7 秒）
+#    （实测每一问 7.7 秒 → 改后稳态 0.9~1.7 秒）
 ollama create qa-embed:4b -f deploy/ollama/Modelfile.qa-embed
 
 # 3) 跑起来（需要 JDK 17 或更高）
@@ -27,6 +27,9 @@ java -jar qa-assistant-1.0.0-SNAPSHOT.jar
 
 **不需要**装 MySQL、不需要 Node、不需要 Python —— 默认使用内置 H2 文件库，数据落在
 `%USERPROFILE%\.qa-assistant\`（Windows）或 `~/.qa-assistant/`（Linux/macOS）。
+
+> 第 2 步虽然多了一行，但它把"每一问都慢"变成"载入一次就稳定"：实测每一问 7.7 秒 →
+> 稳态 0.9~1.7 秒（首字 0.5~0.7 秒）。**多一行、少七秒**，值得留着。
 
 ---
 
@@ -117,6 +120,7 @@ cd web && pnpm dev
 | 启动报 `UnsupportedClassVersionError` | JDK 版本低于 17。`java -version` 确认 |
 | 回答很慢、每个问题先"思考"十几秒 | 对话模型误用了推理模型。请用 `qwen3.5:9b`，**不要**用 `deepseek-r1:8b` |
 | 每个问题都要等 7~10 秒，日志里 `load_duration` 一直是好几秒 | 两个模型在显存里互相挤：多半是漏了上面第 2 步。执行 `ollama create qa-embed:4b -f deploy/ollama/Modelfile.qa-embed`，并把 `qa.local.embedding-model` 设为 `qa-embed:4b`。用 `ollama ps` 可确认两个模型是否同时在列 |
+| 闲置一会儿后，第一个问题又变慢（之后恢复） | 正常现象：Ollama 默认闲置 5 分钟就卸载模型，下一问要重新载入显存（实测第 1 问约 7.9 s、第 2 问约 3.0 s，之后回到 1 秒内）。想避免可给 Ollama 设 `OLLAMA_KEEP_ALIVE=30m`（或 `-1` 永不卸载，代价是显存长期被占） |
 | 提问后长时间无响应或显存溢出 | 显卡显存不足。把 `qa.local.num-ctx` 降到 `8192` 或改走云端模式 |
 | 上传的扫描版 PDF 检索不到内容 | 扫描版是图片，没有文字层，需要 OCR（本期不支持，见开发文档第 9 章） |
 | 重启后知识库空了 | 检查 `%USERPROFILE%\.qa-assistant\index\` 是否存在且可写 |
