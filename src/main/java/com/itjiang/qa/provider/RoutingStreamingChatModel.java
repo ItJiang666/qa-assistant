@@ -22,18 +22,23 @@ public class RoutingStreamingChatModel implements StreamingChatModel {
 
     private final Supplier<StreamingChatModel> delegate;
     private final String label;
+    private final ModelRequestLogger requestLogger;
 
     /**
-     * @param delegate 当前生效模型的来源，每次调用时求值
-     * @param label    用途描述，仅用于日志与排错
+     * @param delegate      当前生效模型的来源，每次调用时求值
+     * @param label         用途描述，仅用于日志与排错
+     * @param requestLogger 请求抓取器（默认关闭，抓现场时临时打开）
      */
-    public RoutingStreamingChatModel(Supplier<StreamingChatModel> delegate, String label) {
+    public RoutingStreamingChatModel(Supplier<StreamingChatModel> delegate, String label,
+                                     ModelRequestLogger requestLogger) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.label = label;
+        this.requestLogger = requestLogger;
     }
 
     @Override
     public void doChat(ChatRequest request, StreamingChatResponseHandler handler) {
+        requestLogger.log(label, request);
         delegate.get().chat(request, handler);
     }
 

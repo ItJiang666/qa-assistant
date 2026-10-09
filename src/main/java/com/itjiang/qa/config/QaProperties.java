@@ -44,6 +44,46 @@ public class QaProperties {
     private Memory memory = new Memory();
     private Local local = new Local();
     private Cloud cloud = new Cloud();
+    private Debug debug = new Debug();
+
+    /**
+     * 排查用开关。
+     *
+     * <h2>为什么单独分一节，而不是塞进 local / cloud</h2>
+     * <p>因为它们<b>与模型来源无关</b>：{@code log-model-requests} 在本地与云端都要生效 ——
+     * 实测那个"回答为 {@code []}"的异常在两种模式下各出现过一次，
+     * 只挂在某一侧就会漏掉另一半现场。
+     */
+    public static class Debug {
+
+        /**
+         * 是否把发给模型的完整消息列表打进日志。
+         *
+         * <p>默认关闭。⚠️ 开启后日志里会有<b>用户提问原文与检索到的文档片段</b>，
+         * 只在抓现场时临时打开，抓到即关。
+         *
+         * <p>它打印的是消息内容，<b>不含 HTTP 头</b>，因此不会泄露 API Key ——
+         * 这也是不能直接用 LangChain4j 自带 {@code logRequests(true)} 的原因
+         * （那个会连 {@code Authorization} 头一起打出来）。
+         */
+        private boolean logModelRequests = false;
+
+        public boolean isLogModelRequests() {
+            return logModelRequests;
+        }
+
+        public void setLogModelRequests(boolean logModelRequests) {
+            this.logModelRequests = logModelRequests;
+        }
+    }
+
+    public Debug getDebug() {
+        return debug;
+    }
+
+    public void setDebug(Debug debug) {
+        this.debug = debug;
+    }
 
     /**
      * @return 数据根目录（已解析为 Path）

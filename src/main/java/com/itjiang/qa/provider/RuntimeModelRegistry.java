@@ -58,17 +58,19 @@ public class RuntimeModelRegistry {
     public RuntimeModelRegistry(LocalModelProvider localProvider,
                                 CloudModelProvider cloudProvider,
                                 RuntimeModeService modeService,
-                                CloudEndpointResolver cloudResolver) {
+                                CloudEndpointResolver cloudResolver,
+                                ModelRequestLogger requestLogger) {
         this.localProvider = localProvider;
         this.cloudProvider = cloudProvider;
         this.modeService = modeService;
         this.cloudResolver = cloudResolver;
 
-        this.routingChat = new RoutingChatModel(() -> chatFor(modeService.current()), "qa");
+        this.routingChat = new RoutingChatModel(
+                () -> chatFor(modeService.current()), "qa", requestLogger);
         this.routingExtract = new RoutingChatModel(
-                () -> extractFor(modeService.current()), "extract");
+                () -> extractFor(modeService.current()), "extract", requestLogger);
         this.routingStreaming = new RoutingStreamingChatModel(
-                () -> streamingFor(modeService.current()), "qa-stream");
+                () -> streamingFor(modeService.current()), "qa-stream", requestLogger);
 
         RuntimeModeService.Mode embeddingMode = modeService.configured();
         log.info("向量模型跟随配置模式: {}（换向量模型需要重启，见类注释）", embeddingMode.value());

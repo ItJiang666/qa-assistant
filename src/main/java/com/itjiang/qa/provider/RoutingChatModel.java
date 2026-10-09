@@ -33,18 +33,23 @@ public class RoutingChatModel implements ChatModel {
 
     private final Supplier<ChatModel> delegate;
     private final String label;
+    private final ModelRequestLogger requestLogger;
 
     /**
-     * @param delegate 当前生效模型的来源，每次调用时求值
-     * @param label    用途描述，仅用于日志与排错
+     * @param delegate      当前生效模型的来源，每次调用时求值
+     * @param label         用途描述，仅用于日志与排错
+     * @param requestLogger 请求抓取器（默认关闭，抓现场时临时打开）
      */
-    public RoutingChatModel(Supplier<ChatModel> delegate, String label) {
+    public RoutingChatModel(Supplier<ChatModel> delegate, String label, ModelRequestLogger requestLogger) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.label = label;
+        this.requestLogger = requestLogger;
     }
 
     @Override
     public ChatResponse doChat(ChatRequest request) {
+        // 这里能拿到组装完毕的消息列表 —— 排查"系统提示词/检索片段到底进没进去"只有这一个地方能看到
+        requestLogger.log(label, request);
         return delegate.get().chat(request);
     }
 

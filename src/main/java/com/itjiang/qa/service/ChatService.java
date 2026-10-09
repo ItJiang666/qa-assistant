@@ -1,6 +1,7 @@
 package com.itjiang.qa.service;
 
 import com.itjiang.qa.assistant.QaAssistant;
+import com.itjiang.qa.common.AnswerGuard;
 import com.itjiang.qa.common.BusinessException;
 import com.itjiang.qa.common.ErrorCode;
 import com.itjiang.qa.config.QaProperties;
@@ -113,11 +114,12 @@ public class ChatService {
         // 所以这里从记录器取 —— 这正是 RecordingContentRetriever 存在的理由
         List<ChatResponse.Source> sources = toSources(RecordingContentRetriever.drain());
 
-        if (answer == null || answer.isBlank()) {
-            // 空回答必须当失败处理：静默的空答案看起来像界面卡住，比报错更难排查
-            log.warn("模型返回空回答, conversationId={}", conversationId);
-            throw new BusinessException(ErrorCode.CHAT_MODEL_ERROR,
-                    "模型返回了空回答。若使用推理类模型，请确认 qa.local.think 已设为 false。");
+        if (AnswerGuard.isEmpty(answer)) {
+            // 空回答必须当失败处理：静默的空答案看起来像界面卡住，比报错更难排查。
+            // 注意判据是 AnswerGuard 而不是 isBlank —— 实测出现过回答为 "[]" 的情况，
+            // isBlank 抓不到它，于是两个方括号被当成正式回答写进了对话历史。
+            log.warn("模型返回空回答, conversationId={}, 原始内容={}", conversationId, answer);
+            throw new BusinessException(ErrorCode.CHAT_MODEL_ERROR, AnswerGuard.emptyAnswerMessage());
         }
 
         conversationService.appendMessage(conversationId, "user", question);
@@ -188,6 +190,14 @@ public class ChatService {
                 .onCompleteResponse(response -> {
                     String answer = buffer.toString();
                     try {
+                        // 空回答守卫：把 [] / {} / 纯标点这类"没说出任何东西"的回答当失败处理。
+                        // 关键是**不要落库** —— 否则两个方括号会进对话历史，
+                        // 之后每一轮都被当作"我之前说过的话"再喂回模型。
+                        if (AnswerGuard.isEmpty(answer)) {
+                            log.warn("流式回答为空, conversationId={}, 原始内容={}", conversationId, answer);
+                            sendEvent(emitter, "error", Map.of("message", AnswerGuard.emptyAnswerMessage()));
+                            return;
+                        }
                         // 流结束才知道完整回答，落库必须放在这里
                         conversationService.appendMessage(conversationId, "user", question);
                         conversationService.appendMessage(conversationId, "assistant", answer);

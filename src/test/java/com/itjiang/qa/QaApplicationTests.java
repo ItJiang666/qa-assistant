@@ -27,9 +27,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>每次运行都用一个新的临时目录，测试之间互不影响；
  * JVM 退出时由 shutdown hook 递归删掉（见 {@link #isolateDataDir}）。
  *
+ * <h2>为什么必须显式钉住 {@code qa.mode=local}</h2>
+ * <p>因为 {@code application.yml} 会导入项目根目录的 {@code .env}（开发者的真实配置）。
+ * 一旦开发者把 {@code QA_MODE} 设成 {@code cloud}，这个测试里的
+ * {@code runMode / chatModel / embeddingModel} 断言就会跟着变 ——
+ * <b>测试结果取决于跑测试那台机器的私有配置</b>，这在 CI 上就是随机失败。
+ * 用 {@code @SpringBootTest(properties = ...)} 钉住：内联测试属性的优先级最高，
+ * 压得过 {@code .env} 导入进来的值。
+ *
  * @author Jiang
  */
-@SpringBootTest
+@SpringBootTest(properties = "qa.mode=local")
 class QaApplicationTests {
 
     /**
