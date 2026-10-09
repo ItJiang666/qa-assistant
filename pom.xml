@@ -35,6 +35,9 @@
         <java.version>17</java.version>
         <!-- 显式声明一遍：source/target 不校验 API，release 才校验，这是关键 -->
         <maven.compiler.release>17</maven.compiler.release>
+        <!-- source/target 仅为让 IntelliJ 推导模块语言级别；Maven 实际编译仍以 release=17 为准 -->
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
 
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
@@ -100,6 +103,17 @@
         <dependency>
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-ollama</artifactId>
+        </dependency>
+        <!--
+          文档解析：Tika 一份依赖覆盖 txt / md / docx / pdf / xlsx / html（开发文档 3.2）。
+          ⚠️ 版本号要写 beta 线：这个模块不在 langchain4j-bom 的管理范围内，
+             它跟随 starter 的版本（1.20.2-beta30）。写 1.20.2 会直接拉不到 ——
+             已验证 Maven Central 上只有 1.20.0-beta30 / 1.20.1-beta30 / 1.20.2-beta30 这一串。
+        -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-document-parser-apache-tika</artifactId>
+            <version>${langchain4j.starter.version}</version>
         </dependency>
         <dependency>
             <groupId>dev.langchain4j</groupId>

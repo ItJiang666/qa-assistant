@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<!--
+  文档表映射。
+
+  跨库约定（开发文档 4.1）：
+    · updated_at 一律显式赋值，不依赖 MySQL 的 ON UPDATE CURRENT_TIMESTAMP（H2 不支持）
+    · 表名列名全小写、不加反引号
+-->
+<mapper namespace="com.itjiang.qa.mapper.DocumentMapper">
+
+    <sql id="columns">
+        id, file_name, file_type, file_size, file_path, chunk_count,
+        status, error_message, embedding_model, collection_name, created_at, updated_at
+    </sql>
+
+    <insert id="insert" parameterType="com.itjiang.qa.model.entity.Document"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO qa_document (file_name, file_type, file_size, file_path, chunk_count,
+                                 status, embedding_model, collection_name, created_at, updated_at)
+        VALUES (#{fileName}, #{fileType}, #{fileSize}, #{filePath}, 0,
+                #{status}, #{embeddingModel}, #{collectionName}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    </insert>
+
+    <select id="selectById" resultType="com.itjiang.qa.model.entity.Document">
+        SELECT <include refid="columns"/>
+        FROM qa_document
+        WHERE id = #{id}
+    </select>
+
+    <select id="selectPage" resultType="com.itjiang.qa.model.entity.Document">
+        SELECT <include refid="columns"/>
+        FROM qa_document
+        ORDER BY id DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="countAll" resultType="long">
+        SELECT COUNT(*) FROM qa_document
+    </select>
+
+    <!-- SUM 可能为 NULL（表为空时），用 COALESCE 兜住，避免映射到 long 时炸掉 -->
+    <select id="sumChunkCount" resultType="long">
+        SELECT COALESCE(SUM(chunk_count), 0) FROM qa_document
+    </select>
+
+    <update id="markParsing">
+        UPDATE qa_document
+        SET status = 'PARSING', error_message = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE id = #{id}
+    </update>
+
+    <update id="markIndexed">
+        UPDATE qa_document
+        SET status = 'INDEXED', chunk_count = #{chunkCount}, error_message = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = #{id}
+    </update>
+
+    <update id="markFailed">
+        UPDATE qa_document
+        SET status = 'FAILED', error_message = #{errorMessage}, updated_at = CURRENT_TIMESTAMP
+        WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM qa_document WHERE id = #{id}
+    </delete>
+
+    <select id="selectAll" resultType="com.itjiang.qa.model.entity.Document">
+        SELECT <include refid="columns"/>
+        FROM qa_document
+        ORDER BY id ASC
+    </select>
+
+    <!-- 应用重启后用来找回"卡在半路"的记录：PENDING 从未开始，PARSING 被中断，
+         FAILED 允许用户点重建时重试 -->
+    <select id="selectUnfinished" resultType="com.itjiang.qa.model.entity.Document">
+        SELECT <include refid="columns"/>
+        FROM qa_document
+        WHERE status IN ('PENDING', 'PARSING', 'FAILED')
+        ORDER BY id ASC
+    </select>
+
+</mapper>

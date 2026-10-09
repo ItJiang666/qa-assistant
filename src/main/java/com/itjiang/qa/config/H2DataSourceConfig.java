@@ -9,8 +9,6 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 
 import javax.sql.DataSource;
-import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 
 /**
@@ -44,18 +42,16 @@ public class H2DataSourceConfig {
     /**
      * 构建 H2 文件模式数据源。
      *
+     * <p>参数里显式带上 {@link DataDirInitializer}，是为了用<b>类型依赖</b>保证
+     * 目录先于数据源创建 —— 否则 H2 会因为父目录不存在而给出一个很晦涩的连接错误。
+     *
      * @param properties 应用配置，提供数据根目录
+     * @param dirs       数据目录初始化器（保证目录已存在）
      * @return H2 数据源
      */
     @Bean
-    public DataSource dataSource(QaProperties properties) {
-        Path dataRoot = properties.dataPath().toAbsolutePath().normalize();
-        Path dbDir = dataRoot.resolve("data");
-        Path uploadDir = dataRoot.resolve("uploads");
-        Path indexDir = dataRoot.resolve("index");
-
-        createDirectories(dbDir, uploadDir, indexDir);
-
+    public DataSource dataSource(QaProperties properties, DataDirInitializer dirs) {
+        Path dbDir = dirs.dataRoot().resolve("data");
         // 归一化为正斜杠：H2 的 URL 解析器对反斜杠不友好
         String dbFile = dbDir.resolve(DB_NAME).toString().replace('\\', '/');
 
@@ -76,24 +72,6 @@ public class H2DataSourceConfig {
         config.setConnectionTimeout(10_000);
 
         log.info("H2 数据源就绪: {}", dbFile + ".mv.db");
-        log.info("数据根目录: {}", dataRoot);
         return new HikariDataSource(config);
-    }
-
-    /**
-     * 创建运行时数据目录（幂等）。
-     *
-     * @param dirs 待创建的目录
-     */
-    private void createDirectories(Path... dirs) {
-        for (Path dir : dirs) {
-            try {
-                Files.createDirectories(dir);
-            } catch (IOException ex) {
-                // 启动期失败必须立刻终止：目录建不出来，后面所有读写都会失败，
-                // 带着一个坏掉的数据源继续启动只会让问题在更难排查的地方爆出来
-                throw new IllegalStateException("无法创建数据目录: " + dir, ex);
-            }
-        }
     }
 }

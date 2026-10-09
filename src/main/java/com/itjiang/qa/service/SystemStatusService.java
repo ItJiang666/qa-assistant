@@ -2,6 +2,7 @@ package com.itjiang.qa.service;
 
 import com.itjiang.qa.config.QaProperties;
 import com.itjiang.qa.context.UserContext;
+import com.itjiang.qa.mapper.DocumentMapper;
 import com.itjiang.qa.model.dto.SystemStatusResponse;
 import com.itjiang.qa.model.enums.RunMode;
 import org.slf4j.Logger;
@@ -30,11 +31,16 @@ public class SystemStatusService {
     private static final Logger log = LoggerFactory.getLogger(SystemStatusService.class);
 
     private final QaProperties properties;
+    private final DocumentMapper documentMapper;
     private final JdbcTemplate jdbcTemplate;
     private final Environment environment;
 
-    public SystemStatusService(QaProperties properties, JdbcTemplate jdbcTemplate, Environment environment) {
+    public SystemStatusService(QaProperties properties,
+                               DocumentMapper documentMapper,
+                               JdbcTemplate jdbcTemplate,
+                               Environment environment) {
         this.properties = properties;
+        this.documentMapper = documentMapper;
         this.jdbcTemplate = jdbcTemplate;
         this.environment = environment;
     }
@@ -77,26 +83,40 @@ public class SystemStatusService {
     /**
      * 统计已入库文档数。
      *
-     * <p>查询失败时返回 0 而不抛异常：状态接口的意义是"无论如何都能告诉你现在怎么样"，
-     * 它自己挂掉就失去了价值。
-     *
      * @return 文档总数
      */
     private long countDocuments() {
-        return queryCount("SELECT COUNT(*) FROM qa_document", "qa_document");
+        try {
+            return documentMapper.countAll();
+        } catch (Exception ex) {
+            log.warn("统计文档数失败（返回 0，不阻断状态接口）: {}", ex.getMessage());
+            return 0L;
+        }
     }
 
     /**
      * 统计分块总数。
      *
+     * <p>以数据库为准而不是问向量库：LangChain4j 的 {@code EmbeddingStore} 接口
+     * 没有 count()，而 {@code qa_document.chunk_count} 之和是我们写进去的真值，
+     * 换任何向量库实现都成立。
+     *
      * @return 所有文档的分块数之和
      */
     private long countChunks() {
-        return queryCount("SELECT COALESCE(SUM(chunk_count), 0) FROM qa_document", "qa_document.chunk_count");
+        try {
+            return documentMapper.sumChunkCount();
+        } catch (Exception ex) {
+            log.warn("统计分块数失败（返回 0）: {}", ex.getMessage());
+            return 0L;
+        }
     }
 
     /**
      * 统计指定用户的长期记忆条数（仅 ACTIVE）。
+     *
+     * <p>P3.5 阶段会引入 MemoryMapper 取代这里的裸 SQL；当前直接用 JdbcTemplate，
+     * 是为了在还没有长期记忆功能时就先把"记忆条数"这个指标暴露出来。
      *
      * @param userId 用户标识，为 {@code null} 时不做查询直接返回 0
      * @return 记忆条数
@@ -112,23 +132,6 @@ public class SystemStatusService {
             return count == null ? 0L : count;
         } catch (Exception ex) {
             log.warn("统计长期记忆失败: {}", ex.getMessage());
-            return 0L;
-        }
-    }
-
-    /**
-     * 执行计数查询，失败时降级为 0。
-     *
-     * @param sql  计数 SQL
-     * @param what 用于日志的说明
-     * @return 计数结果
-     */
-    private long queryCount(String sql, String what) {
-        try {
-            Long count = jdbcTemplate.queryForObject(sql, Long.class);
-            return count == null ? 0L : count;
-        } catch (Exception ex) {
-            log.warn("统计 {} 失败（返回 0，不阻断状态接口）: {}", what, ex.getMessage());
             return 0L;
         }
     }
