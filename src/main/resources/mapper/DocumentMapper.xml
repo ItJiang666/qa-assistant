@@ -76,6 +76,10 @@
         DELETE FROM qa_document WHERE id = #{id}
     </delete>
 
+    <select id="selectDistinctEmbeddingModels" resultType="java.lang.String">
+        SELECT DISTINCT embedding_model FROM qa_document WHERE embedding_model IS NOT NULL
+    </select>
+
     <select id="selectAll" resultType="com.itjiang.qa.model.entity.Document">
         SELECT <include refid="columns"/>
         FROM qa_document

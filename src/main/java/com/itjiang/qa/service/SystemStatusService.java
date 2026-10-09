@@ -4,6 +4,7 @@ import com.itjiang.qa.config.QaProperties;
 import com.itjiang.qa.context.UserContext;
 import com.itjiang.qa.mapper.DocumentMapper;
 import com.itjiang.qa.model.dto.SystemStatusResponse;
+import com.itjiang.qa.provider.CloudEndpointResolver;
 import com.itjiang.qa.provider.RuntimeModelRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,17 +36,23 @@ public class SystemStatusService {
     private final JdbcTemplate jdbcTemplate;
     private final Environment environment;
     private final RuntimeModelRegistry modelRegistry;
+    private final RuntimeModeService modeService;
+    private final CloudEndpointResolver cloudResolver;
 
     public SystemStatusService(QaProperties properties,
                                DocumentMapper documentMapper,
                                JdbcTemplate jdbcTemplate,
                                Environment environment,
-                               RuntimeModelRegistry modelRegistry) {
+                               RuntimeModelRegistry modelRegistry,
+                               RuntimeModeService modeService,
+                               CloudEndpointResolver cloudResolver) {
         this.properties = properties;
         this.documentMapper = documentMapper;
         this.jdbcTemplate = jdbcTemplate;
         this.environment = environment;
         this.modelRegistry = modelRegistry;
+        this.modeService = modeService;
+        this.cloudResolver = cloudResolver;
     }
 
     /**
@@ -60,6 +67,8 @@ public class SystemStatusService {
      */
     public SystemStatusResponse currentStatus() {
         String userId = UserContext.get();
+        CloudEndpointResolver.ResolvedEndpoint chatEndpoint = cloudResolver.chat();
+        CloudEndpointResolver.ResolvedEndpoint embeddingEndpoint = cloudResolver.embedding();
         return new SystemStatusResponse(
                 modelRegistry.chatMode().value(),
                 modelRegistry.chatModelName(),
@@ -72,7 +81,61 @@ public class SystemStatusService {
                 countChunks(),
                 countMemories(userId),
                 userId != null,
-                userId);
+                userId,
+                modelRegistry.configuredChatMode().value(),
+                modeService.overridden(),
+                modelRegistry.embeddingMode().value(),
+                chatEndpoint.label() == null ? chatEndpoint.providerId() : chatEndpoint.label(),
+                chatEndpoint.model(),
+                describeEmbedding(embeddingEndpoint),
+                chatEndpoint.usable(),
+                chatEndpoint.usable() ? null : chatEndpoint.missingHint() + "（补到 .env 或环境变量后重启应用）",
+                indexWarning());
+    }
+
+    /**
+     * 判断索引与当前向量模型是否一致，不一致时给出一句可照做的提示。
+     *
+     * <p><b>为什么必须靠"模型名"而不是"维度"来判断：</b> 实测硅基流动的
+     * Qwen3-Embedding-4B 与本地 qa-embed:4b 维度相同（都是 2560），但同一段文本
+     * 在两边的向量余弦只有 0.988 —— 维度检查完全抓不到这种"同维不同空间"的情况，
+     * 它不会报错，只会让分数被系统性压低。名字对不上就提示重建，是唯一可靠的判据。
+     *
+     * @return 提示文案；一致时返回 {@code null}
+     */
+    private String indexWarning() {
+        try {
+            String current = modelRegistry.embeddingModelName();
+            List<String> used = documentMapper.selectDistinctEmbeddingModels();
+            List<String> foreign = used.stream()
+                    .filter(name -> name != null && !name.equals(current))
+                    .toList();
+            if (foreign.isEmpty()) {
+                return null;
+            }
+            return "向量索引由 " + String.join("、", foreign) + " 建立，当前向量模型是 " + current
+                    + "。两者向量空间不同：维度不同会直接检索失败，维度相同也会让相似度被系统性压低。"
+                    + "请在「文档管理」页点击「重建索引」。";
+        } catch (Exception ex) {
+            // 状态接口不能因为一次统计失败就整体不可用
+            log.warn("检查索引与向量模型一致性失败: {}", ex.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 描述向量端点（模型名 + 维度）。
+     *
+     * @param endpoint 云端向量端点
+     * @return 形如 {@code Qwen/Qwen3-Embedding-4B（2560 维）}
+     */
+    private String describeEmbedding(CloudEndpointResolver.ResolvedEndpoint endpoint) {
+        if (endpoint.model() == null) {
+            return null;
+        }
+        return endpoint.dimension() == null
+                ? endpoint.model()
+                : endpoint.model() + "（" + endpoint.dimension() + " 维）";
     }
 
     /**

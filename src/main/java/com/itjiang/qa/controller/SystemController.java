@@ -1,14 +1,21 @@
 package com.itjiang.qa.controller;
 
 import com.itjiang.qa.common.ApiResponse;
+import com.itjiang.qa.model.dto.ChatModeRequest;
+import com.itjiang.qa.model.dto.CloudCheckResponse;
 import com.itjiang.qa.model.dto.SystemStatusResponse;
+import com.itjiang.qa.service.CloudConnectivityService;
+import com.itjiang.qa.service.RuntimeModeService;
 import com.itjiang.qa.service.SystemStatusService;
+import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 系统状态接口（F9）。
+ * 系统状态与模型来源接口（F9）。
  *
  * <p>控制器只做三件事：接请求、调服务、包响应。任何判断逻辑都不应写在这一层 ——
  * 否则一旦要在别处复用同样的逻辑，就只能复制粘贴。
@@ -20,9 +27,15 @@ import org.springframework.web.bind.annotation.RestController;
 public class SystemController {
 
     private final SystemStatusService systemStatusService;
+    private final RuntimeModeService runtimeModeService;
+    private final CloudConnectivityService connectivityService;
 
-    public SystemController(SystemStatusService systemStatusService) {
+    public SystemController(SystemStatusService systemStatusService,
+                            RuntimeModeService runtimeModeService,
+                            CloudConnectivityService connectivityService) {
         this.systemStatusService = systemStatusService;
+        this.runtimeModeService = runtimeModeService;
+        this.connectivityService = connectivityService;
     }
 
     /**
@@ -36,5 +49,36 @@ public class SystemController {
     @GetMapping("/status")
     public ApiResponse<SystemStatusResponse> status() {
         return ApiResponse.ok(systemStatusService.currentStatus());
+    }
+
+    /**
+     * 切换对话模式（本地 ⇄ 云端），立即生效、无需重启。
+     *
+     * <p>只能切<b>对话</b>模型：向量模型的来源在启动时定死（换向量模型等于换向量空间，
+     * 必须连索引一起重建）。切到云端前会校验端点三要素齐备，缺 Key 就当场拒绝 ——
+     * 让用户"切换成功"之后 401，比直接拒绝更糟。
+     *
+     * <p>切换结果返回<b>整份最新状态</b>，前端不必再补一次 /status 请求。
+     *
+     * @param request 目标模式
+     * @return 切换后的系统状态
+     */
+    @PostMapping("/chat-mode")
+    public ApiResponse<SystemStatusResponse> switchChatMode(@RequestBody @Valid ChatModeRequest request) {
+        runtimeModeService.switchTo(RuntimeModeService.Mode.from(request.mode()));
+        return ApiResponse.ok(systemStatusService.currentStatus());
+    }
+
+    /**
+     * 云端连通性自检。
+     *
+     * <p>用 POST 而不是 GET：它会产生对外部服务的真实请求（有副作用、有耗时），
+     * 不该被浏览器或网关当成可缓存的读操作。
+     *
+     * @return 各端点的检查结果
+     */
+    @PostMapping("/cloud-check")
+    public ApiResponse<CloudCheckResponse> cloudCheck() {
+        return ApiResponse.ok(connectivityService.checkAll());
     }
 }

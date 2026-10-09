@@ -121,6 +121,15 @@ public class RuntimeModelRegistry {
     }
 
     /**
+     * 配置里的默认对话模式（重启后回到的那个值）。
+     *
+     * @return 模式
+     */
+    public RuntimeModeService.Mode configuredChatMode() {
+        return modeService.configured();
+    }
+
+    /**
      * 当前向量模型所属的模式（与配置一致，不会变）。
      *
      * @return 模式

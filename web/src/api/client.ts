@@ -83,6 +83,35 @@ export interface SystemStatus {
   memoryCount: number
   userIdentified: boolean
   userId: string | null
+  // ── P4：模型来源相关 ──────────────────────────────────────────────
+  /** 配置里的默认模式（重启后回到的值）。 */
+  configuredRunMode: string
+  /** 当前模式是否与配置不同（即被运行时改过）。 */
+  modeOverridden: boolean
+  /** 向量模型所属模式（只读，换它需重启并重建索引）。 */
+  embeddingRunMode: string
+  cloudProvider: string | null
+  cloudChatModel: string | null
+  cloudEmbeddingModel: string | null
+  /** 云端对话端点是否可用（Key 与模型名齐备）。 */
+  cloudReady: boolean
+  /** 云端不可用的原因；可用时为 null。 */
+  cloudBlockedReason: string | null
+  /** 索引与当前向量模型不一致的提示；一致时为 null。 */
+  indexWarning: string | null
+}
+
+/** 连通性自检的单项结果。 */
+export interface CloudCheckItem {
+  target: string
+  label: string
+  url: string
+  model: string
+  reachable: boolean
+  status: number | null
+  latencyMs: number
+  ok: boolean
+  message: string
 }
 
 export interface DocumentItem {
@@ -150,6 +179,22 @@ export interface ChatDone {
 
 export const api = {
   systemStatus: () => request<SystemStatus>('/api/v1/system/status'),
+
+  /**
+   * 切换对话模式（本地 ⇄ 云端）。
+   *
+   * 只切对话模型：向量模型的来源在启动时定死（换它等于换向量空间，必须重建索引）。
+   * 返回切换后的完整状态，调用方不必再请求一次 status。
+   */
+  switchChatMode: (mode: 'local' | 'cloud') =>
+      request<SystemStatus>('/api/v1/system/chat-mode', {
+        method: 'POST',
+        body: JSON.stringify({ mode })
+      }),
+
+  /** 云端连通性自检：不消耗生成额度，用于区分"Key 不对"与"网络不通"。 */
+  cloudCheck: () => request<{ items: CloudCheckItem[] }>(
+      '/api/v1/system/cloud-check', { method: 'POST' }),
 
   listDocuments: (page = 1, size = 50) =>
       request<{ total: number; items: DocumentItem[] }>(`/api/v1/documents?page=${page}&size=${size}`),

@@ -109,6 +109,17 @@ public interface DocumentMapper {
     int deleteById(Long id);
 
     /**
+     * 查出所有文档用过的向量模型名（去重）。
+     *
+     * <p>用于"索引与当前向量模型是否一致"的判断：只要存在任何一个与当前模型不同的值，
+     * 就说明库里的向量来自另一个模型 —— 此时要么维度不同直接报错，
+     * 要么维度相同但分数被系统性压低（更隐蔽），两种都该提示用户重建索引。
+     *
+     * @return 去重后的模型名列表
+     */
+    List<String> selectDistinctEmbeddingModels();
+
+    /**
      * 查出全部文档，用于全量重建索引。
      *
      * @return 全部文档

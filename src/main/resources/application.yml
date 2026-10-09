@@ -101,12 +101,15 @@ qa:
       # custom-parameters:
       #   reasoning_effort: none
     embedding:
-      provider: dashscope
-      model: text-embedding-v4
-      # ⚠️ 百炼默认 1024 维，与本地 qa-embed:4b 的 2560 维**不同** ⇒ 切换向量模型必须重建索引。
-      #    可选：2048 / 1536 / 1024 / 768 / 512 / 256 / 128 / 64。
-      #    想免重建就把 provider 换成 siliconflow（Qwen3-Embedding-4B，2560 维，与本地同源同维）。
-      dimension: 1024
+      provider: siliconflow
+      model: Qwen/Qwen3-Embedding-4B
+      # ⚠️ 实测值，不是厂商默认值（官方文档未标注默认维度，我们实测定为 2560）：
+      #    不传 dimensions 时返回 2560；显式写出来是为了防止上游悄悄改默认值。
+      # ⚠️ 它与本地 qa-embed:4b 的向量**不完全相同**：同一文本两边余弦 0.988，
+      #    而不同文本之间只有 0.29 —— 同源（同一份权重）但受量化与推理实现影响。
+      #    所以"维度相同"不等于"可以混用"：换向量来源后仍应重建索引，
+      #    否则分数会被系统性压低约 1.2%（不报错，只是悄悄变差）。
+      dimension: 2560
       # 云端向量接口单次提交条数。
       # ⚠️ 实测：配 16 时入库直接 400 —— 百炼 text-embedding-v4 单次最多 10 条：
       #    InvalidParameter: batch size is invalid, it should not be larger than 10.
