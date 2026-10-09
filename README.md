@@ -77,8 +77,29 @@ Spring Boot 4.1.1 · LangChain4j 1.20.2 · MyBatis · H2 / MySQL · Vue 3 · **�
 ```bash
 git clone <repo-url>
 cd qa-assistant
+
+# 1) 前端（仓库里已含构建产物，只在改前端时需要重新执行）
+cd web && pnpm install && pnpm build && cd ..
+
+# 2) 后端
 mvn clean package
+
+# 3) 运行
 java -jar target/qa-assistant-1.0.0-SNAPSHOT.jar
+```
+
+> ⚠️ **顺序不能反**：Vite 的产物输出到 `src/main/resources/static/`，
+> 必须先构建前端再 `mvn package`，否则打进 jar 的还是上一次的界面 ——
+> 表现为"我明明改了前端，运行起来却没变化"。
+
+**前端开发模式**（改代码即时热更新，不必反复打包）：
+
+```bash
+# 终端 1：后端
+mvn spring-boot:run
+
+# 终端 2：前端（访问 http://localhost:5173，/api 会代理到 8080）
+cd web && pnpm dev
 ```
 
 ---
