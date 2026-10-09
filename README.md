@@ -12,10 +12,16 @@
 # 1) 拉模型（一次性，约 8.5 GB）
 ollama pull qwen3.5:9b && ollama pull qwen3-embedding:4b
 
-# 2) 跑起来（需要 JDK 17 或更高）
+# 2) 生成项目专用的向量模型（一次性，复用上面已拉取的权重，不额外下载）
+#    把向量模型的上下文窗口从自带的 40960 压到 2048：不改这一步，
+#    它会独占约 10 GB 显存并把对话模型挤出去，导致每次提问都要重新加载两个模型
+#    （实测单次问答 7.7 秒 → 改后 0.7 秒）
+ollama create qa-embed:4b -f deploy/ollama/Modelfile.qa-embed
+
+# 3) 跑起来（需要 JDK 17 或更高）
 java -jar qa-assistant-1.0.0-SNAPSHOT.jar
 
-# 3) 打开浏览器
+# 4) 打开浏览器
 #    http://localhost:8080
 ```
 
@@ -110,6 +116,7 @@ cd web && pnpm dev
 |---|---|
 | 启动报 `UnsupportedClassVersionError` | JDK 版本低于 17。`java -version` 确认 |
 | 回答很慢、每个问题先"思考"十几秒 | 对话模型误用了推理模型。请用 `qwen3.5:9b`，**不要**用 `deepseek-r1:8b` |
+| 每个问题都要等 7~10 秒，日志里 `load_duration` 一直是好几秒 | 两个模型在显存里互相挤：多半是漏了上面第 2 步。执行 `ollama create qa-embed:4b -f deploy/ollama/Modelfile.qa-embed`，并把 `qa.local.embedding-model` 设为 `qa-embed:4b`。用 `ollama ps` 可确认两个模型是否同时在列 |
 | 提问后长时间无响应或显存溢出 | 显卡显存不足。把 `qa.local.num-ctx` 降到 `8192` 或改走云端模式 |
 | 上传的扫描版 PDF 检索不到内容 | 扫描版是图片，没有文字层，需要 OCR（本期不支持，见开发文档第 9 章） |
 | 重启后知识库空了 | 检查 `%USERPROFILE%\.qa-assistant\index\` 是否存在且可写 |

@@ -1,0 +1,23 @@
+# qa-assistant 专用向量模型（派生自 qwen3-embedding:4b）
+#
+# 为什么需要这个派生模型：
+#   qwen3-embedding:4b 自带 40960 的上下文窗口，Ollama 会照此分配 KV 缓存，
+#   实测这一项就让该模型占掉约 10 GB 显存。在 12 GB 显卡上它与对话模型
+#   （qwen3.5:9b 约 6.1 GB）无法共存，Ollama 只能加载一个、踢掉另一个，
+#   于是"每问一次"都要重新加载两个模型：
+#       嵌入模型 2.9 秒 + 对话模型 4.8 秒
+#   单次问答因此从 0.7 秒劣化到 7.7 秒（实测，见开发文档 9.1）。
+#   把 num_ctx 压到 2048 后占用降到 4.1 GB，两个模型可长期共存。
+#
+# 为什么不需要重建索引：
+#   本模型与 qwen3-embedding:4b 共用同一份权重（ollama create 时直接复用已有层，
+#   不下载任何东西）。num_ctx 只决定"一次能读多长的输入"，不改变向量本身 ——
+#   维度仍是 2560，已有向量库继续有效。
+#
+# 用法（一次性）：
+#   ollama create qa-embed:4b -f deploy/ollama/Modelfile.qa-embed
+#
+# 上下文够不够：本项目切片 500 字、查询是一句话，都远小于 2048 token。
+
+FROM qwen3-embedding:4b
+PARAMETER num_ctx 2048

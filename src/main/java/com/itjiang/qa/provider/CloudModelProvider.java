@@ -22,7 +22,8 @@ import dev.langchain4j.model.embedding.EmbeddingModel;
  * <ul>
  *   <li>对话：DeepSeek，{@code https://api.deepseek.com/v1}，OpenAI 兼容协议</li>
  *   <li>向量：硅基流动 {@code Qwen/Qwen3-Embedding-4B}（2560 维）——
- *       与本地 {@code qwen3-embedding:4b} 同源同维，因此两种模式切换<b>不需要重建索引</b></li>
+ *       与本地 {@code qa-embed:4b}（派生自 qwen3-embedding:4b，同权重同维度）
+ *       同源同维，因此两种模式切换<b>不需要重建索引</b></li>
  *   <li>需要新增依赖 {@code dev.langchain4j:langchain4j-open-ai}</li>
  *   <li>API Key 一律走环境变量，仓库里只留 {@code .env.example}</li>
  * </ul>

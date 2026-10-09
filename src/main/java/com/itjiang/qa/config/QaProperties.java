@@ -287,8 +287,24 @@ public class QaProperties {
          */
         private String chatModel = "qwen3.5:9b";
 
-        /** 向量模型。注意维度是 2560，不是网上常说的 768。 */
-        private String embeddingModel = "qwen3-embedding:4b";
+        /**
+         * 向量模型。
+         *
+         * <p>默认 {@code qa-embed:4b}，由 {@code deploy/ollama/Modelfile.qa-embed} 派生：
+         * {@code FROM qwen3-embedding:4b} + {@code PARAMETER num_ctx 2048}。部署前要执行一次
+         * {@code ollama create qa-embed:4b -f deploy/ollama/Modelfile.qa-embed}。
+         *
+         * <p><b>为什么不直接用 qwen3-embedding:4b：</b>那个模型自带 40960 的上下文窗口，
+         * Ollama 会照此分配 KV 缓存，实测占掉约 10 GB 显存。在 12 GB 显卡上它与
+         * 对话模型无法共存，Ollama 只能"加载一个踢掉另一个"，于是<b>每次提问</b>都要
+         * 重新加载：嵌入 2.9 秒 + 对话 4.8 秒。压到 2048 后占用降到 4.1 GB，两者长期共存，
+         * 单次问答从 7.7 秒回到 0.7 秒（实测见开发文档 9.1）。
+         *
+         * <p><b>维度仍是 2560</b>（与 qwen3-embedding:4b 共用同一份权重，num_ctx 只影响
+         * 能读多长的输入，不影响向量本身），因此切换过来<b>不需要</b>重建索引；
+         * 换成别的向量模型才必须全量重建。
+         */
+        private String embeddingModel = "qa-embed:4b";
 
         /**
          * 上下文窗口大小，可填 {@code auto} 或具体数字（4096 / 8192 / 16384）。

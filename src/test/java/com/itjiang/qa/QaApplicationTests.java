@@ -72,7 +72,7 @@ class QaApplicationTests {
         assertThat(status.database()).isEqualTo("h2");
         assertThat(status.runMode()).isEqualTo("local");
         assertThat(status.chatModel()).isEqualTo("qwen3.5:9b");
-        assertThat(status.embeddingModel()).isEqualTo("qwen3-embedding:4b");
+        assertThat(status.embeddingModel()).isEqualTo("qa-embed:4b");
         assertThat(status.documentCount()).isZero();
         assertThat(status.chunkCount()).isZero();
         assertThat(status.memoryCount()).isZero();
