@@ -5,6 +5,7 @@ import com.itjiang.qa.config.QaProperties;
 import com.itjiang.qa.mapper.DocumentMapper;
 import com.itjiang.qa.model.entity.Document;
 import com.itjiang.qa.model.enums.DocStatus;
+import com.itjiang.qa.rag.SegmentMetadata;
 import dev.langchain4j.data.document.DocumentSplitter;
 import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.document.parser.apache.tika.ApacheTikaDocumentParser;
@@ -52,13 +53,13 @@ public class DocumentIngestService {
     private static final Logger log = LoggerFactory.getLogger(DocumentIngestService.class);
 
     /** metadata 键：文档 ID。删除向量时按它过滤，不能改名。 */
-    public static final String META_DOCUMENT_ID = "documentId";
+    public static final String META_DOCUMENT_ID = SegmentMetadata.DOCUMENT_ID;
 
     /** metadata 键：原始文件名。引用来源展示用。 */
-    public static final String META_FILE_NAME = "fileName";
+    public static final String META_FILE_NAME = SegmentMetadata.FILE_NAME;
 
     /** metadata 键：分块序号，从 0 开始。 */
-    public static final String META_CHUNK_INDEX = "chunkIndex";
+    public static final String META_CHUNK_INDEX = SegmentMetadata.CHUNK_INDEX;
 
     private final EmbeddingModel embeddingModel;
     private final VectorStoreService vectorStoreService;

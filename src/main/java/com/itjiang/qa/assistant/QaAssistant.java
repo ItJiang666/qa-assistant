@@ -35,7 +35,8 @@ import dev.langchain4j.service.spring.AiServiceWiringMode;
         wiringMode = AiServiceWiringMode.EXPLICIT,
         chatModel = "qaChatModel",
         streamingChatModel = "qaStreamingChatModel",
-        chatMemoryProvider = "qaChatMemoryProvider"
+        chatMemoryProvider = "qaChatMemoryProvider",
+        contentRetriever = "qaContentRetriever"
 )
 public interface QaAssistant {
 
@@ -52,19 +53,31 @@ public interface QaAssistant {
      *   <li>语言与格式漂移 → 中英夹杂、结构混乱，难读</li>
      * </ol>
      *
-     * <p>P3 阶段会在此之上注入检索到的参考资料（{@code {{contents}}}），
-     * P3.5 阶段会加入长期记忆段落。本阶段（P1）还没有检索，
-     * 因此模型会因"资料中没有"而如实回答 —— <b>这正是我们要观察的行为</b>。
+     * <p><b>第 2 条是整套防幻觉机制的地基。</b> 需要说明它为什么写成"下方没有资料、
+     * 或资料中没有相关内容"两种情形：检索用的是 {@code minScore} 阈值过滤，
+     * 当没有任何片段达标时，注入的参考资料会是**空的**。此时若提示词只写
+     * "资料中没有就说未找到"，模型面对一个空的资料区，很可能把它当成
+     * "让我自由发挥"，转而用自己的训练知识作答 —— 那正是我们要杜绝的。
+     *
+     * <p>检索片段由 {@code contentRetriever} 自动注入到用户消息里（LangChain4j 的
+     * 默认注入器会把命中内容追加在问题之后），因此这里不需要手写占位符。
      */
     String SYSTEM_MESSAGE = """
-            你是一个知识库问答助手。你的回答必须严格基于「参考资料」。
+            你是一个知识库问答助手，服务于一个内部知识库。
 
             【铁律】
-            1. 只使用参考资料中的信息回答，不得用你自己的知识补充
-            2. 参考资料中没有的内容，明确回答"现有资料中未找到相关信息"
+            1. 只使用下方提供的资料回答，不得使用你自己的知识补充
+            2. 如果下方没有出现任何资料，或资料中没有相关内容，
+               一律回答"现有资料中未找到相关信息"，不要尝试用自己的知识作答
             3. 严禁编造任何规定、数字、流程
             4. 引用具体内容时注明来源文档名
-            5. 用中文回答；步骤用序号，结论放前面
+            5. 用中文回答；结论放前面，步骤用序号
+
+            【特别注意】
+            你的知识库是公司内部资料，范围很窄。对于常识类问题
+            （例如地理、历史、通用技术），知识库里几乎一定没有资料 ——
+            这类问题同样必须回答"现有资料中未找到相关信息"，
+            而不是用你训练时学到的知识来回答。
             """;
 
     /**

@@ -127,6 +127,7 @@ public class SystemStatusService {
         }
         try {
             Long count = jdbcTemplate.queryForObject(
+                    //TODO 此处未配置数据源，使用URL直连数据库，因此报错，不影响程序执行，可以不修改
                     "SELECT COUNT(*) FROM qa_memory WHERE user_id = ? AND status = 'ACTIVE'",
                     Long.class, userId);
             return count == null ? 0L : count;

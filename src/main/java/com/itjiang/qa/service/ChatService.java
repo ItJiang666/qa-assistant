@@ -8,6 +8,11 @@ import com.itjiang.qa.context.UserContext;
 import com.itjiang.qa.model.dto.ChatRequest;
 import com.itjiang.qa.model.dto.ChatResponse;
 import com.itjiang.qa.model.enums.RunMode;
+import com.itjiang.qa.rag.RecordingContentRetriever;
+import com.itjiang.qa.rag.SegmentMetadata;
+import dev.langchain4j.data.segment.TextSegment;
+import dev.langchain4j.rag.content.Content;
+import dev.langchain4j.rag.content.ContentMetadata;
 import dev.langchain4j.service.TokenStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,6 +25,7 @@ import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 问答编排（开发文档 4.3.2）。
@@ -48,6 +54,9 @@ public class ChatService {
 
     /** SSE 连接超时：设为 5 分钟，覆盖"用户挂着页面慢慢看"的场景。 */
     private static final long SSE_TIMEOUT_MS = 5 * 60 * 1000L;
+
+    /** 引用来源摘要的最大字符数。 */
+    private static final int SNIPPET_MAX_LENGTH = 200;
 
     private final QaAssistant assistant;
     private final QaProperties properties;
@@ -79,8 +88,15 @@ public class ChatService {
         try {
             answer = assistant.chat(conversationId, question);
         } catch (Exception ex) {
+            // 异常路径也要清掉检索记录：ThreadLocal 会跟着复用的线程活到下一个请求，
+            // 那会导致下一个问题引用到毫不相干的文档，而且随机复现
+            RecordingContentRetriever.clear();
             throw translateFailure(ex, question);
         }
+        // 取出本次检索命中作为"引用来源"。框架只把内容注入 Prompt，不会回传，
+        // 所以这里从记录器取 —— 这正是 RecordingContentRetriever 存在的理由
+        List<ChatResponse.Source> sources = toSources(RecordingContentRetriever.drain());
+
         if (answer == null || answer.isBlank()) {
             // 空回答必须当失败处理：静默的空答案看起来像界面卡住，比报错更难排查
             log.warn("模型返回空回答, conversationId={}", conversationId);
@@ -98,8 +114,7 @@ public class ChatService {
         return new ChatResponse(
                 conversationId,
                 answer,
-                // P3 阶段填入检索来源；现在保持空列表，让前端接口契约从一开始就稳定
-                List.of(),
+                sources,
                 elapsedMs,
                 RunMode.from(properties.getMode()).getValue(),
                 properties.getLocal().getChatModel());
@@ -123,6 +138,9 @@ public class ChatService {
 
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
         StringBuilder buffer = new StringBuilder();
+        // 流式场景下检索结果通过 onRetrieved 回调送进来，用 AtomicReference 承接
+        // （回调可能在任何线程上执行，普通变量会有可见性问题）
+        AtomicReference<List<ChatResponse.Source>> sourcesRef = new AtomicReference<>(List.of());
         long startNanos = System.nanoTime();
 
         // 先推一条 meta，让前端立刻拿到 conversationId 并开始渲染，不必等第一个 token
@@ -130,6 +148,7 @@ public class ChatService {
 
         TokenStream tokenStream = assistant.chatStream(conversationId, question);
         tokenStream
+                .onRetrieved(contents -> sourcesRef.set(toSources(contents)))
                 .onPartialResponse(token -> {
                     buffer.append(token);
                     sendEvent(emitter, "delta", Map.of("text", token));
@@ -141,24 +160,79 @@ public class ChatService {
                         conversationService.appendMessage(conversationId, "user", question);
                         conversationService.appendMessage(conversationId, "assistant", answer);
                         long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
-                        log.info("流式问答完成: conversationId={}, 耗时 {} ms, 回答 {} 字",
-                                conversationId, elapsedMs, answer.length());
+                        log.info("流式问答完成: conversationId={}, 耗时 {} ms, 回答 {} 字, 引用 {} 条",
+                                conversationId, elapsedMs, answer.length(), sourcesRef.get().size());
                         sendEvent(emitter, "done", Map.of(
                                 "conversationId", conversationId,
                                 "elapsedMs", elapsedMs,
-                                "model", properties.getLocal().getChatModel()));
+                                "model", properties.getLocal().getChatModel(),
+                                "sources", sourcesRef.get()));
                     } finally {
+                        RecordingContentRetriever.clear();
                         emitter.complete();
                     }
                 })
                 .onError(error -> {
                     log.error("流式问答失败: conversationId={}", conversationId, error);
+                    RecordingContentRetriever.clear();
                     sendEvent(emitter, "error", Map.of("message", friendlyMessage(error)));
                     emitter.complete();
                 })
                 .start();
 
         return emitter;
+    }
+
+    /**
+     * 检索命中 → 引用来源。
+     *
+     * <p>每一条来源都带上文档名与原文片段，让用户能<b>点开核对</b>。
+     * 这不是锦上添花：只能看到一段没有出处的文字，用户就只能靠猜要不要信；
+     * 能核对，错误答案才会被发现。
+     *
+     * @param contents 检索命中
+     * @return 引用来源列表
+     */
+    private List<ChatResponse.Source> toSources(List<Content> contents) {
+        if (contents == null || contents.isEmpty()) {
+            return List.of();
+        }
+        return contents.stream()
+                // 过滤掉"检索为空"时注入的占位内容：它不是真的文档片段，
+                // 展示成引用来源会让用户以为知识库里真有这么一份文档
+                .filter(content -> !RecordingContentRetriever.isPlaceholder(content))
+                .map(content -> {
+            TextSegment segment = content.textSegment();
+            Long documentId = segment.metadata().getLong(SegmentMetadata.DOCUMENT_ID);
+            String fileName = segment.metadata().getString(SegmentMetadata.FILE_NAME);
+
+            // 相似度得分放在 Content 的 metadata 里，而不是片段自己的 metadata 里
+            Double score = null;
+            Object rawScore = content.metadata().get(ContentMetadata.SCORE);
+            if (rawScore instanceof Number number) {
+                score = number.doubleValue();
+            }
+            return new ChatResponse.Source(documentId, fileName, snippet(segment.text()), score);
+        }).toList();
+    }
+
+    /**
+     * 截取片段摘要。
+     *
+     * <p>片段本身有 chunkSize（默认 500）那么长，整段返回会让响应体膨胀数倍，
+     * 而前端展示引用来源时只需要一小段。真要看全文，用户可以点进原文档。
+     *
+     * @param text 片段全文
+     * @return 摘要文本
+     */
+    private String snippet(String text) {
+        if (text == null) {
+            return "";
+        }
+        String normalized = text.strip();
+        return normalized.length() <= SNIPPET_MAX_LENGTH
+                ? normalized
+                : normalized.substring(0, SNIPPET_MAX_LENGTH) + "…";
     }
 
     /**

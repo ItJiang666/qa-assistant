@@ -1,10 +1,15 @@
 package com.itjiang.qa.config;
 
+import com.itjiang.qa.rag.RecordingContentRetriever;
 import dev.langchain4j.data.segment.TextSegment;
+import dev.langchain4j.model.embedding.EmbeddingModel;
+import dev.langchain4j.rag.content.retriever.ContentRetriever;
+import dev.langchain4j.rag.content.retriever.EmbeddingStoreContentRetriever;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import dev.langchain4j.store.embedding.inmemory.InMemoryEmbeddingStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -30,6 +35,44 @@ public class RagConfig {
 
     /** 向量库落盘文件名。 */
     private static final String STORE_FILE = "embedding-store.json";
+
+    /**
+     * 检索器（开发文档 4.3.2 / F5）。
+     *
+     * <p>两个参数的取值直接决定回答质量，改动前请先想清楚：
+     * <ul>
+     *   <li><b>{@code maxResults}（topK，默认 4）</b> —— 给模型的资料条数。
+     *       太少会漏掉关键段落；太多会把上下文挤满（4.6.6 的预算表里检索占 ~2000 token）。</li>
+     *   <li><b>{@code minScore}（默认 0.6）</b> —— <b>防幻觉的第一道闸门</b>。
+     *       低于阈值的结果宁可不给模型。这一条比 Prompt 里的任何措辞都管用：
+     *       模型没看到资料时，"我不知道"是它唯一合理的选择。</li>
+     * </ul>
+     *
+     * <p>外面包了一层 {@link RecordingContentRetriever}：框架只负责把检索结果注入 Prompt，
+     * 不会回传给调用方，而我们需要把它作为"引用来源"返回给前端。
+     *
+     * @param store      向量库
+     * @param model      向量模型
+     * @param properties 应用配置（topK / minScore）
+     * @return 带记录能力的检索器
+     */
+    @Bean("qaContentRetriever")
+    public ContentRetriever qaContentRetriever(EmbeddingStore<TextSegment> store,
+                                               @Qualifier("qaEmbeddingModel") EmbeddingModel model,
+                                               QaProperties properties) {
+        int topK = properties.getRetrieval().getTopK();
+        double minScore = properties.getRetrieval().getMinScore();
+        log.info("检索器就绪: topK={}, minScore={}（低于阈值的结果不会交给模型）", topK, minScore);
+
+        ContentRetriever delegate = EmbeddingStoreContentRetriever.builder()
+                .embeddingStore(store)
+                .embeddingModel(model)
+                .maxResults(topK)
+                .minScore(minScore)
+                .displayName("qa-knowledge-base")
+                .build();
+        return new RecordingContentRetriever(delegate);
+    }
 
     /**
      * 向量库。
