@@ -4,6 +4,7 @@ import jakarta.validation.ConstraintViolationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
@@ -136,6 +137,23 @@ public class GlobalExceptionHandler {
         log.debug("资源不存在: {}", ex.getResourcePath());
         return ResponseEntity.status(404)
                 .body(ApiResponse.fail(ErrorCode.PARAM_INVALID, "接口或资源不存在: " + ex.getResourcePath()));
+    }
+
+    /**
+     * 请求体无法解析（畸形 JSON、类型不匹配等）。
+     *
+     * <p>这条容易被漏掉：如果不显式处理，畸形 JSON 会落到最后的兜底分支，
+     * 变成 500「系统内部错误」——但客户端写错了请求体，是<b>它的</b>问题，
+     * 返回 5xx 会让监控告警、也会让调用方误以为服务端故障而盲目重试。
+     *
+     * @param ex 消息不可读异常
+     * @return 400
+     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<ApiResponse<Void>> handleMessageNotReadable(HttpMessageNotReadableException ex) {
+        log.warn("请求体解析失败: {}", ex.getMessage());
+        return ResponseEntity.status(ErrorCode.PARAM_INVALID.getHttpStatus())
+                .body(ApiResponse.fail(ErrorCode.PARAM_INVALID, "请求体格式错误，无法解析为 JSON"));
     }
 
     /**

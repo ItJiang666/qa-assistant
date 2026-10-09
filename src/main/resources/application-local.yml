@@ -24,4 +24,10 @@ qa:
     #      不改这里，Java 侧算得再精确的 token 预算也会被截断。
     num-ctx: auto
 
+    # 是否让模型先输出思维链再作答。
+    # ⚠️ 本机实测（RTX 5070 / qwen3.5:9b）：think=true 时一句"你好"要 6860 ms（生成 777 字思维链），
+    #    think=false 只要 415 ms —— 差 16.5 倍。本项目是"查资料给结论"，不是数学证明，故默认关闭。
+    #    另注：提示词层面的 /no_think 软开关实测无效，必须走这个 API 参数。
+    think: false
+
     timeout: 120s

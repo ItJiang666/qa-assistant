@@ -302,6 +302,36 @@ public class QaProperties {
         /** 模型调用超时（ISO-8601 时长格式）。 */
         private String timeout = "120s";
 
+        /**
+         * 是否让 qwen3.5 这类模型先输出思维链再作答。
+         *
+         * <p><b>默认关闭，这个默认值是有实测依据的。</b> 本机实测（RTX 5070 / qwen3.5:9b）：
+         * <pre>
+         *   think=true   一句"你好"生成 777 字思维链，耗时 6860 ms
+         *   think=false  同样的问题，耗时  415 ms   —— 快 16.5 倍
+         * </pre>
+         * 本项目的场景是"查资料后给结论"，不是数学证明，思维链带来的收益远小于它的延迟代价。
+         * 另外提示词层面的 {@code /no_think} 软开关实测<b>无效</b>（6.5 秒，仍生成思维链），
+         * 必须走 API 参数，所以这里必须显式设置。
+         */
+        private boolean think = false;
+
+        /**
+         * 是否打印发往 Ollama 的请求体。
+         *
+         * <p>默认关闭。只在排查"参数到底有没有生效"这类问题时临时打开 ——
+         * 例如 {@code think=false} 是否真的传给了服务端。请求体里会包含用户问题，
+         * 因此<b>生产环境不要打开</b>。
+         */
+        private boolean logRequests = false;
+
+        /**
+         * 是否打印 Ollama 的原始响应体。
+         *
+         * <p>同样只用于排查问题：可以据此确认模型是否返回了 thinking 段落。
+         */
+        private boolean logResponses = false;
+
         public String getBaseUrl() {
             return baseUrl;
         }
@@ -340,6 +370,30 @@ public class QaProperties {
 
         public void setTimeout(String timeout) {
             this.timeout = timeout;
+        }
+
+        public boolean isThink() {
+            return think;
+        }
+
+        public void setThink(boolean think) {
+            this.think = think;
+        }
+
+        public boolean isLogRequests() {
+            return logRequests;
+        }
+
+        public void setLogRequests(boolean logRequests) {
+            this.logRequests = logRequests;
+        }
+
+        public boolean isLogResponses() {
+            return logResponses;
+        }
+
+        public void setLogResponses(boolean logResponses) {
+            this.logResponses = logResponses;
         }
     }
 

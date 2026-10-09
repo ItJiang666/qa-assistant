@@ -106,11 +106,13 @@
             <artifactId>langchain4j-spring-boot4-starter</artifactId>
             <version>${langchain4j.starter.version}</version>
         </dependency>
-        <dependency>
-            <groupId>dev.langchain4j</groupId>
-            <artifactId>langchain4j-ollama-spring-boot4-starter</artifactId>
-            <version>${langchain4j.starter.version}</version>
-        </dependency>
+        <!--
+          刻意不引入 langchain4j-ollama-spring-boot4-starter：
+          它会在 classpath 上自动创建 ChatModel / EmbeddingModel Bean，而本项目是双模式设计
+          （qa.mode 决定用本地还是云端），模型必须由 com.itjiang.qa.config.ModelConfig 显式装配。
+          两者的 Bean 会互相干扰，且自动装配的模型拿不到 num_ctx 等关键参数。
+          @AiService 所需的能力由上面的 langchain4j-spring-boot4-starter 提供，够用。
+        -->
 
         <!-- ── 测试 ── -->
         <dependency>
