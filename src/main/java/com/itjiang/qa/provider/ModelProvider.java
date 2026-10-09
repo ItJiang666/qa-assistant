@@ -27,6 +27,17 @@ public interface ModelProvider {
     ChatModel chatModel();
 
     /**
+     * 结构化抽取专用模型（温度 0）。
+     *
+     * <p>长期记忆抽取要求模型输出严格 JSON。用问答模型的温度（0.3）
+     * 会让它时不时加上寒暄、markdown 代码块或解释文字，解析就失败了。
+     * 抽取任务不需要任何创造性，温度越低越稳。
+     *
+     * @return 抽取模型
+     */
+    ChatModel extractChatModel();
+
+    /**
      * 流式对话模型（SSE 输出用）。
      *
      * @return 流式对话模型

@@ -2,6 +2,7 @@ package com.itjiang.qa.memory;
 
 import com.itjiang.qa.mapper.MessageMapper;
 import com.itjiang.qa.model.entity.Message;
+import com.itjiang.qa.rag.Prompts;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
@@ -69,14 +70,29 @@ public class JdbcChatMemoryStore implements ChatMemoryStore {
         String conversationId = String.valueOf(memoryId);
         List<Message> rows = messageMapper.selectByConversation(conversationId);
 
-        List<ChatMessage> messages = new ArrayList<>(rows.size());
+        List<ChatMessage> messages = new ArrayList<>(rows.size() + 1);
+
+        // ★ 系统提示词必须在这里拼上，而不是靠 @AiService 上的 @SystemMessage。
+        //
+        //   原因（实测踩过，不是推测）：一旦配置了 chatMemoryStore，LangChain4j 的
+        //   ChatMemory 就以 store 为准 —— 框架把 system 消息 add 进内存后会调用
+        //   updateMessages()，而我们为了让对话历史只由 ChatService 唯一落库，
+        //   那个方法是刻意留空的；紧接着框架又从 getMessages() 重新读取，
+        //   于是 framework 加进去的 system 消息当场丢失。
+        //
+        //   实测现象：请求体里 messages 数组只有一条 user 消息，system 段完全不存在，
+        //   铁律与长期记忆全部没进 Prompt。表现是"提示词写了但模型不听话"，
+        //   而且不会有任何报错 —— 属于最难发现的一类问题。
+        messages.add(SystemMessage.from(Prompts.SYSTEM));
+
         for (Message row : rows) {
             ChatMessage message = toChatMessage(row);
             if (message != null) {
                 messages.add(message);
             }
         }
-        log.debug("装载会话记忆: conversationId={}, 历史消息 {} 条", conversationId, messages.size());
+        log.debug("装载会话记忆: conversationId={}, 历史消息 {} 条（另含系统提示词）",
+                conversationId, messages.size() - 1);
         return messages;
     }
 

@@ -82,6 +82,20 @@ public class ModelConfig {
     }
 
     /**
+     * 长期记忆抽取专用模型（温度 0）。
+     *
+     * <p>单独一个 Bean，而不是复用 {@code qaChatModel}：抽取要求输出严格 JSON，
+     * 问答模型的温度会让它偶尔加上寒暄或 markdown 代码块，解析就失败。
+     *
+     * @param provider 当前生效的模型供应商
+     * @return 抽取模型
+     */
+    @Bean("qaExtractChatModel")
+    public ChatModel qaExtractChatModel(ModelProvider provider) {
+        return provider.extractChatModel();
+    }
+
+    /**
      * 对外暴露的向量模型 Bean（入库与检索使用）。
      *
      * @param provider 当前生效的模型供应商

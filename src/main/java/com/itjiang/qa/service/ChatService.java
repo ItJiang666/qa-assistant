@@ -61,13 +61,19 @@ public class ChatService {
     private final QaAssistant assistant;
     private final QaProperties properties;
     private final ConversationService conversationService;
+    private final LongTermMemoryService longTermMemoryService;
+    private final MemoryExtractService memoryExtractService;
 
     public ChatService(QaAssistant assistant,
                        QaProperties properties,
-                       ConversationService conversationService) {
+                       ConversationService conversationService,
+                       LongTermMemoryService longTermMemoryService,
+                       MemoryExtractService memoryExtractService) {
         this.assistant = assistant;
         this.properties = properties;
         this.conversationService = conversationService;
+        this.longTermMemoryService = longTermMemoryService;
+        this.memoryExtractService = memoryExtractService;
     }
 
     /**
@@ -84,9 +90,12 @@ public class ChatService {
         String conversationId = conversationService.ensureConversation(
                 userId, request.conversationId(), question);
 
+        // L3 长期记忆：跨会话，由我们自己查好后传给助手（框架不管这件事）
+        String longTermMemory = longTermMemoryService.loadForPrompt(userId);
+
         String answer;
         try {
-            answer = assistant.chat(conversationId, question);
+            answer = assistant.chat(conversationId, composeUserMessage(question, longTermMemory));
         } catch (Exception ex) {
             // 异常路径也要清掉检索记录：ThreadLocal 会跟着复用的线程活到下一个请求，
             // 那会导致下一个问题引用到毫不相干的文档，而且随机复现
@@ -106,6 +115,13 @@ public class ChatService {
 
         conversationService.appendMessage(conversationId, "user", question);
         conversationService.appendMessage(conversationId, "assistant", answer);
+
+        // L3 写入：异步抽取，绝不阻塞返回。
+        // userId 必须显式传进去 —— ThreadLocal 不会传播到异步线程。
+        // 未识别用户（无 X-User-Id）时 userId 为 null，extractAsync 内部会直接跳过。
+        if (request.rememberOrDefault()) {
+            memoryExtractService.extractAsync(userId, conversationId, question, answer);
+        }
 
         long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
         log.info("问答完成: conversationId={}, 耗时 {} ms, 问题 {} 字, 回答 {} 字",
@@ -135,6 +151,7 @@ public class ChatService {
         String question = request.question().trim();
         String conversationId = conversationService.ensureConversation(
                 userId, request.conversationId(), question);
+        String longTermMemory = longTermMemoryService.loadForPrompt(userId);
 
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
         StringBuilder buffer = new StringBuilder();
@@ -146,7 +163,7 @@ public class ChatService {
         // 先推一条 meta，让前端立刻拿到 conversationId 并开始渲染，不必等第一个 token
         sendEvent(emitter, "meta", Map.of("conversationId", conversationId));
 
-        TokenStream tokenStream = assistant.chatStream(conversationId, question);
+        TokenStream tokenStream = assistant.chatStream(conversationId, composeUserMessage(question, longTermMemory));
         tokenStream
                 .onRetrieved(contents -> sourcesRef.set(toSources(contents)))
                 .onPartialResponse(token -> {
@@ -159,6 +176,11 @@ public class ChatService {
                         // 流结束才知道完整回答，落库必须放在这里
                         conversationService.appendMessage(conversationId, "user", question);
                         conversationService.appendMessage(conversationId, "assistant", answer);
+                        // 流式路径同样触发 L3 抽取：必须在流结束后，
+                        // 因为那时才知道完整回答长什么样
+                        if (request.rememberOrDefault()) {
+                            memoryExtractService.extractAsync(userId, conversationId, question, answer);
+                        }
                         long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
                         log.info("流式问答完成: conversationId={}, 耗时 {} ms, 回答 {} 字, 引用 {} 条",
                                 conversationId, elapsedMs, answer.length(), sourcesRef.get().size());
@@ -181,6 +203,36 @@ public class ChatService {
                 .start();
 
         return emitter;
+    }
+
+    /**
+     * 把长期记忆拼进用户消息。
+     *
+     * <h2>为什么拼在用户消息里，而不是系统消息里</h2>
+     * <ol>
+     *   <li><b>系统消息无法按请求插值。</b> 它由 {@code JdbcChatMemoryStore} 统一供给
+     *       （见 {@code Prompts} 里的完整说明），那里没有模板引擎，
+     *       而长期记忆本来就是每次提问才查出来的。</li>
+     *   <li><b>紧挨着问题的位置约束力更强。</b> 已用对照实验验证：
+     *       同样一段"回答控制在三句话以内"的偏好，放在系统消息里与放在问题后面
+     *       都能被模型遵守；但用户消息里的那一份不会被检索片段挤到远处。</li>
+     * </ol>
+     *
+     * <p>注意落库时保存的仍然是<b>原始问题</b>（见 {@code ask} 与 {@code stream}），
+     * 这一段落只在本次请求生效，不会被写进对话历史、也不会污染 L2 记忆。
+     *
+     * @param question       原始问题
+     * @param longTermMemory 已拼好的长期记忆段落（可能为"（暂无）"）
+     * @return 发给模型的用户消息
+     */
+    private String composeUserMessage(String question, String longTermMemory) {
+        if (longTermMemory == null || longTermMemory.isBlank()
+                || LongTermMemoryService.NO_MEMORY.equals(longTermMemory)) {
+            return question;
+        }
+        return question
+                + "\n\n【关于你的长期记忆】以下是跨会话记住的、关于你的偏好与背景：\n"
+                + longTermMemory;
     }
 
     /**

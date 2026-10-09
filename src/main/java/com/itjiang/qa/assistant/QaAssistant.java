@@ -1,7 +1,6 @@
 package com.itjiang.qa.assistant;
 
 import dev.langchain4j.service.MemoryId;
-import dev.langchain4j.service.SystemMessage;
 import dev.langchain4j.service.TokenStream;
 import dev.langchain4j.service.UserMessage;
 import dev.langchain4j.service.spring.AiService;
@@ -10,24 +9,31 @@ import dev.langchain4j.service.spring.AiServiceWiringMode;
 /**
  * 问答助手 —— 能力层核心（开发文档 10.1）。
  *
- * <p>这是一个<b>接口</b>，实现由 LangChain4j 在启动时生成。检索、记忆、
- * Prompt 注入、流式回调这些横切逻辑都由框架接管，业务代码只声明"我要什么"。
+ * <p>这是一个<b>接口</b>，实现由 LangChain4j 在启动时生成。检索、记忆与流式回调
+ * 这些横切逻辑都由框架接管，业务代码只声明"我要什么"。
  *
- * <p>注意这里的依赖全部是<b>按 Bean 名字</b>引用的（{@code qaChatModel} 等），
- * 名字与 {@code ModelConfig} 中定义的 Bean 一一对应。改名字必须两边一起改，
- * 编译器帮不上忙 —— 这也是为什么装配集中在 {@code ModelConfig} 一个文件里。
+ * <p>依赖全部<b>按 Bean 名字</b>引用（{@code qaChatModel} 等），名字与
+ * {@code ModelConfig} / {@code RagConfig} / {@code MemoryConfig} 中定义的 Bean
+ * 一一对应。改名字必须两边一起改，编译器帮不上忙 —— 这也是为什么装配集中在配置类里。
  *
- * <p><b>⚠️ {@code wiringMode = EXPLICIT} 是必须的，不能省。</b>
- * 默认的 {@code AUTOMATIC} 模式会自动发现容器里"唯一的"检索组件并挂上来。
- * 于是每次对话都会先走一次向量检索：调用 embedding 模型（qwen3-embedding:4b，
- * 加载时占 5.8 GiB 显存）→ 把对话模型挤出显存 → 对话模型重载。
+ * <h2>⚠️ 这里为什么没有 {@code @SystemMessage}</h2>
+ * <p>不是忘了，是<b>刻意移除的</b>。系统提示词改由
+ * {@code JdbcChatMemoryStore.getMessages()} 拼在消息列表最前面。
  *
- * <p>本机实测代价：单次问答 <b>7.9 秒 → 0.3 秒</b>（Ollama 侧每请求发生一次
- * "model predicted to exceed available memory, evicting"）。这类问题不会报错，
- * 只会让一切变慢，因此必须靠显式装配从根上避免。
+ * <p>原因：一旦配置了 {@code chatMemoryProvider}，LangChain4j 的 ChatMemory 就以
+ * {@code chatMemoryStore} 为准 —— 框架把 {@code @SystemMessage} 构造的消息
+ * {@code add} 进内存后会调用 {@code updateMessages()}，而那个方法是刻意留空的
+ * （为了让对话历史只由 ChatService 唯一落库）；紧接着框架又从 {@code getMessages()}
+ * 重新读取，于是 system 消息当场丢失。
  *
- * <p>真正需要检索时（P3），我们会在 {@code RagConfig} 里显式构建
- * {@code ContentRetriever} 并在这里指名引用 —— 那也是 EXPLICIT 模式。
+ * <p>实测现象：请求体里 {@code messages} 数组只有一条 user 消息，system 段完全不存在，
+ * 铁律与长期记忆都没进 Prompt，而且<b>不报任何错</b>。这类"配置看起来对、实际没生效"
+ * 的问题只能靠抓请求体发现，因此在这里留下完整记录。
+ *
+ * <h2>wiringMode 必须是 EXPLICIT</h2>
+ * <p>默认的 AUTOMATIC 会自动发现容器里的检索组件并挂上，导致每次对话都先做一次
+ * 向量检索、加载 embedding 模型、把对话模型挤出显存 —— 实测单次问答 7.9 秒。
+ * 改显式后 0.15 秒，相差约 50 倍。
  *
  * @author Jiang
  */
@@ -41,71 +47,31 @@ import dev.langchain4j.service.spring.AiServiceWiringMode;
 public interface QaAssistant {
 
     /**
-     * 系统提示词。
-     *
-     * <p><b>这份提示词直接决定回答质量，改动前请先想清楚。</b>
-     * 五条铁律分别对应五类失败模式：
-     * <ol>
-     *   <li>用模型自身的知识回答 → 用户拿到一个"看起来对"但没出处的答案</li>
-     *   <li>资料里没有就硬编 → 编造的内部规定会被当成真的执行</li>
-     *   <li>编造数字与流程 → 这是知识库问答里危害最大的一类幻觉</li>
-     *   <li>不给出处 → 用户无法核对，错误答案会被无声地信任</li>
-     *   <li>语言与格式漂移 → 中英夹杂、结构混乱，难读</li>
-     * </ol>
-     *
-     * <p><b>第 2 条是整套防幻觉机制的地基。</b> 需要说明它为什么写成"下方没有资料、
-     * 或资料中没有相关内容"两种情形：检索用的是 {@code minScore} 阈值过滤，
-     * 当没有任何片段达标时，注入的参考资料会是**空的**。此时若提示词只写
-     * "资料中没有就说未找到"，模型面对一个空的资料区，很可能把它当成
-     * "让我自由发挥"，转而用自己的训练知识作答 —— 那正是我们要杜绝的。
-     *
-     * <p>检索片段由 {@code contentRetriever} 自动注入到用户消息里（LangChain4j 的
-     * 默认注入器会把命中内容追加在问题之后），因此这里不需要手写占位符。
-     */
-    String SYSTEM_MESSAGE = """
-            你是一个知识库问答助手，服务于一个内部知识库。
-
-            【铁律】
-            1. 只使用下方提供的资料回答，不得使用你自己的知识补充
-            2. 如果下方没有出现任何资料，或资料中没有相关内容，
-               一律回答"现有资料中未找到相关信息"，不要尝试用自己的知识作答
-            3. 严禁编造任何规定、数字、流程
-            4. 引用具体内容时注明来源文档名
-            5. 用中文回答；结论放前面，步骤用序号
-
-            【特别注意】
-            你的知识库是公司内部资料，范围很窄。对于常识类问题
-            （例如地理、历史、通用技术），知识库里几乎一定没有资料 ——
-            这类问题同样必须回答"现有资料中未找到相关信息"，
-            而不是用你训练时学到的知识来回答。
-            """;
-
-    /**
      * 单轮问答（同步）。
      *
-     * <p>{@code @MemoryId} 让框架按会话隔离记忆：同一个 conversationId 的历史会被带进
-     * 本次请求的上下文，不同会话互不干扰。记忆的持久化由 {@code JdbcChatMemoryStore} 负责。
+     * <p>{@code @MemoryId} 让框架按会话隔离 L2 记忆：同一 conversationId 的历史会被带进
+     * 本次请求，由 {@code JdbcChatMemoryStore} 从数据库读取。
      *
-     * <p>P3 阶段补上 {@code contentRetriever}；P3.5 补上长期记忆变量。
+     * <p>长期记忆（L3）由 {@code ChatService} 拼进 {@code question} 一起传进来 ——
+     * 它在用户消息里，而不是系统消息里：一方面是系统消息由 store 供给、无法按请求插值，
+     * 另一方面紧挨着问题的位置对模型的约束力更强（已实测验证）。
      *
-     * @param conversationId 会话 ID（记忆隔离的键）
-     * @param question       用户问题
+     * @param conversationId 会话 ID（L2 记忆隔离的键）
+     * @param question       用户消息（原始问题，必要时已附加长期记忆段落）
      * @return 模型回答
      */
-    @SystemMessage(SYSTEM_MESSAGE)
     String chat(@MemoryId String conversationId, @UserMessage String question);
 
     /**
      * 单轮问答（流式，{@code /api/v1/chat/stream} 使用）。
      *
-     * <p>返回 {@code TokenStream} 而非直接吐文本：调用方需要挂上"逐字回调"、
-     * "完成回调"和"错误回调"三个钩子 —— 尤其是完成回调，
-     * 它是在流式场景下把回答落库的唯一时机。
+     * <p>返回 {@code TokenStream} 而非直接吐文本：调用方需要挂上逐字回调、
+     * 检索结果回调、完成回调与错误回调 —— 尤其是完成回调，
+     * 它是在流式场景下把回答落库、并触发长期记忆抽取的唯一时机。
      *
      * @param conversationId 会话 ID
-     * @param question       用户问题
+     * @param question       用户消息
      * @return token 流，需由调用方 {@code .start()} 触发
      */
-    @SystemMessage(SYSTEM_MESSAGE)
     TokenStream chatStream(@MemoryId String conversationId, @UserMessage String question);
 }

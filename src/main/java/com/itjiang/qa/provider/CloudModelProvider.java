@@ -43,6 +43,11 @@ public class CloudModelProvider implements ModelProvider {
     }
 
     @Override
+    public ChatModel extractChatModel() {
+        throw notImplemented();
+    }
+
+    @Override
     public StreamingChatModel streamingChatModel() {
         throw notImplemented();
     }

@@ -63,6 +63,24 @@ public class LocalModelProvider implements ModelProvider {
     }
 
     @Override
+    public ChatModel extractChatModel() {
+        QaProperties.Local cfg = properties.getLocal();
+        int numCtx = numCtxResolver.resolve();
+        log.info("装配本地抽取模型: {} (temperature=0, think={})", cfg.getChatModel(), cfg.isThink());
+
+        OllamaChatModel.OllamaChatModelBuilder builder = OllamaChatModel.builder()
+                .baseUrl(cfg.getBaseUrl())
+                .modelName(cfg.getChatModel())
+                // 抽取要的是稳定性，不是创造力
+                .temperature(0.0)
+                .numCtx(numCtx)
+                .timeout(parseTimeout(cfg.getTimeout()))
+                .maxRetries(1);
+        builder.think(cfg.isThink());
+        return builder.build();
+    }
+
+    @Override
     public StreamingChatModel streamingChatModel() {
         QaProperties.Local cfg = properties.getLocal();
         int numCtx = numCtxResolver.resolve();

@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<!--
+  长期记忆表映射。
+
+  ⚠️ 所有查改删都带 user_id 条件 —— 这是隐私边界，不是可选的过滤条件。
+     少写一个 where user_id，就意味着"拿到 id 就能改别人的记忆"。
+
+  跨库约定：updated_at 一律显式赋值（H2 不支持 MySQL 的 ON UPDATE CURRENT_TIMESTAMP）
+-->
+<mapper namespace="com.itjiang.qa.mapper.MemoryMapper">
+
+    <sql id="columns">
+        id, user_id, memory_type, mem_key, content, confidence, importance,
+        source_conv_id, status, hit_count, created_at, updated_at
+    </sql>
+
+    <insert id="insert" parameterType="com.itjiang.qa.model.entity.Memory"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO qa_memory (user_id, memory_type, mem_key, content, confidence, importance,
+                               source_conv_id, status, hit_count, created_at, updated_at)
+        VALUES (#{userId}, #{memoryType}, #{memKey}, #{content}, #{confidence}, #{importance},
+                #{sourceConvId}, 'ACTIVE', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    </insert>
+
+    <!--
+      同一主题再次被提到：更新内容，并把置信度/重要度向高处取。
+      GREATEST 在 H2 与 MySQL 上都存在。
+    -->
+    <update id="updateByUserAndKey" parameterType="com.itjiang.qa.model.entity.Memory">
+        UPDATE qa_memory
+        SET content     = #{content},
+            memory_type = #{memoryType},
+            confidence  = GREATEST(confidence, #{confidence}),
+            importance  = GREATEST(importance, #{importance}),
+            status      = 'ACTIVE',
+            updated_at  = CURRENT_TIMESTAMP
+        WHERE user_id = #{userId} AND mem_key = #{memKey}
+    </update>
+
+    <select id="selectById" resultType="com.itjiang.qa.model.entity.Memory">
+        SELECT <include refid="columns"/>
+        FROM qa_memory
+        WHERE user_id = #{userId} AND id = #{id}
+    </select>
+
+    <select id="selectByUserAndKey" resultType="com.itjiang.qa.model.entity.Memory">
+        SELECT <include refid="columns"/>
+        FROM qa_memory
+        WHERE user_id = #{userId} AND mem_key = #{memKey}
+    </select>
+
+    <!-- 注入用：重要的、新鲜的排前面 -->
+    <select id="selectTopForInject" resultType="com.itjiang.qa.model.entity.Memory">
+        SELECT <include refid="columns"/>
+        FROM qa_memory
+        WHERE user_id = #{userId} AND status = 'ACTIVE'
+        ORDER BY importance DESC, updated_at DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectActiveByUser" resultType="com.itjiang.qa.model.entity.Memory">
+        SELECT <include refid="columns"/>
+        FROM qa_memory
+        WHERE user_id = #{userId} AND status = 'ACTIVE'
+        ORDER BY importance DESC, updated_at DESC
+    </select>
+
+    <select id="countActiveByUser" resultType="long">
+        SELECT COUNT(*)
+        FROM qa_memory
+        WHERE user_id = #{userId} AND status = 'ACTIVE'
+    </select>
+
+    <update id="increaseHitCount">
+        UPDATE qa_memory
+        SET hit_count = hit_count + 1
+        WHERE user_id = #{userId} AND id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </update>
+
+    <update id="updateContent">
+        UPDATE qa_memory
+        SET content    = #{content},
+            importance = #{importance},
+            updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = #{userId} AND id = #{id}
+    </update>
+
+    <update id="softDelete">
+        UPDATE qa_memory
+        SET status = 'DELETED', updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = #{userId} AND id = #{id}
+    </update>
+
+    <delete id="deleteAllByUser">
+        DELETE FROM qa_memory WHERE user_id = #{userId}
+    </delete>
+
+    <!--
+      淘汰：保留"最重要 + 最新"的 keep 条，其余软删。
+      用 NOT IN 子查询而不是 LIMIT —— H2 的 DELETE 不支持 LIMIT，
+      MySQL 的 DELETE ... LIMIT 也不允许带子查询，NOT IN 两边都能跑。
+    -->
+    <update id="evictOverflow">
+        UPDATE qa_memory
+        SET status = 'DELETED', updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = #{userId} AND status = 'ACTIVE'
+          AND id NOT IN (
+            SELECT id FROM (
+              SELECT id FROM qa_memory
+              WHERE user_id = #{userId} AND status = 'ACTIVE'
+              ORDER BY importance DESC, updated_at DESC
+              LIMIT #{keep}
+            ) keep_rows
+          )
+    </update>
+
+</mapper>
