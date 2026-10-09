@@ -59,11 +59,16 @@ public class H2DataSourceConfig {
         config.setPoolName("qa-h2-pool");
         config.setDriverClassName("org.h2.Driver");
         config.setJdbcUrl("jdbc:h2:file:" + dbFile
-                // MODE=MySQL：让 H2 接受 AUTO_INCREMENT 等 MySQL 语法，两份 DDL 才能保持一致
+                // MODE=MySQL：让 H2 接受 AUTO_INCREMENT 等 MySQL 语法，
+                // 两份建表脚本（schema-h2.sql / schema-mysql.sql）才能保持一致
                 + ";MODE=MySQL"
-                // 表名/列名统一按小写处理，避免大小写敏感导致的"表不存在"
-                + ";DATABASE_TO_LOWER=TRUE"
-                // 允许 IDEA 与命令行同时访问同一个库文件（否则第二个连接会被拒绝）
+                // ★ 刻意不加 DATABASE_TO_LOWER=TRUE：
+                //   加上它会让 schema 名变成小写 public，于是 IDEA / DBeaver 等外部工具
+                //   用默认设置连接时会报 `Schema "public" not found`（实际踩过，
+                //   报错堆栈会写进 data/qa.trace.db）。
+                //   不加的话 H2 用默认的大写 PUBLIC，而我们的 SQL 全是不带引号的
+                //   小写标识符，H2 会自动归一化 —— 应用照常工作，外部工具也能用裸 URL 连。
+                // AUTO_SERVER=TRUE：允许 IDEA 与命令行同时访问同一个库文件
                 + ";AUTO_SERVER=TRUE");
         config.setUsername("sa");
         config.setPassword("");
