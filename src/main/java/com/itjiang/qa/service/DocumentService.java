@@ -9,6 +9,7 @@ import com.itjiang.qa.model.dto.DocumentDto;
 import com.itjiang.qa.model.dto.UploadResult;
 import com.itjiang.qa.model.entity.Document;
 import com.itjiang.qa.model.enums.DocStatus;
+import com.itjiang.qa.provider.RuntimeModelRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -57,17 +58,20 @@ public class DocumentService {
     private final VectorStoreService vectorStoreService;
     private final QaProperties properties;
     private final DataDirInitializer dirs;
+    private final RuntimeModelRegistry modelRegistry;
 
     public DocumentService(DocumentMapper documentMapper,
                            DocumentIngestService ingestService,
                            VectorStoreService vectorStoreService,
                            QaProperties properties,
-                           DataDirInitializer dirs) {
+                           DataDirInitializer dirs,
+                           RuntimeModelRegistry modelRegistry) {
         this.documentMapper = documentMapper;
         this.ingestService = ingestService;
         this.vectorStoreService = vectorStoreService;
         this.properties = properties;
         this.dirs = dirs;
+        this.modelRegistry = modelRegistry;
     }
 
     /**
@@ -94,7 +98,7 @@ public class DocumentService {
         document.setFilePath(stored.toString());
         document.setStatus(DocStatus.PENDING.getValue());
         document.setChunkCount(0);
-        document.setEmbeddingModel(properties.getLocal().getEmbeddingModel());
+        document.setEmbeddingModel(modelRegistry.embeddingModelName());
         document.setCollectionName(collectionName());
         documentMapper.insert(document);
 
@@ -181,12 +185,15 @@ public class DocumentService {
     }
 
     /**
-     * 更新向量模型标识（换模型后调用，记录本次入库用的是哪个模型）。
+     * 当前生效的向量模型名（界面与重建索引提示用）。
      *
-     * @return 当前配置的向量模型名
+     * <p>P4 起必须问注册表：云端模式下向量模型不再是 {@code qa.local.embedding-model}，
+     * 继续读本地配置会让"重建索引"这类操作提示出错误的模型名。
+     *
+     * @return 当前向量模型名
      */
     public String currentEmbeddingModel() {
-        return properties.getLocal().getEmbeddingModel();
+        return modelRegistry.embeddingModelName();
     }
 
     /**
@@ -307,7 +314,7 @@ public class DocumentService {
      * @return 集合名
      */
     private String collectionName() {
-        return "qa_" + properties.getLocal().getEmbeddingModel().replaceAll("[^A-Za-z0-9]", "_");
+        return "qa_" + modelRegistry.embeddingModelName().replaceAll("[^A-Za-z0-9]", "_");
     }
 
     /**

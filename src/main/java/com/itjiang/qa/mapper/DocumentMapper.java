@@ -74,6 +74,24 @@ public interface DocumentMapper {
     int markIndexed(@Param("id") Long id, @Param("chunkCount") int chunkCount);
 
     /**
+     * 更新该文档向量所属的模型标识与集合名。
+     *
+     * <p><b>为什么入库完成后还要再写一次：</b>上传时写入的是"当时"的向量模型；
+     * 而全量重建索引（F10）会用"当前"的向量模型重新生成全部向量 ——
+     * 此时若不同步这两列，数据库就会与向量库<b>撒谎</b>：
+     * 界面显示旧模型名、实际向量却是新模型生成的，后续任何按模型名做的
+     * 一致性检查（"要不要重建索引"）都会得出错误结论。
+     *
+     * @param id              文档 ID
+     * @param embeddingModel  实际用于生成向量的模型名
+     * @param collectionName  所属向量集合名
+     * @return 影响行数
+     */
+    int updateIndexIdentity(@Param("id") Long id,
+                            @Param("embeddingModel") String embeddingModel,
+                            @Param("collectionName") String collectionName);
+
+    /**
      * 更新状态为失败并记录原因。
      *
      * @param id           文档 ID

@@ -677,10 +677,17 @@ public class QaProperties {
             /**
              * 单次 embedAll 的批大小。
              *
-             * <p>默认 16。本地 Ollama 无所谓，但云端有限流：一份 139 个片段的文档
-             * 一次性发过去会吃 429。分批 + 退避是云端入库的必需品。
+             * <p>默认 10。这个默认值是**被真实报错教育出来的**：本地 Ollama 无所谓，
+             * 但云端有限制，而且各家不一样 —— 百炼 {@code text-embedding-v4}
+             * 单次最多 10 条，超了直接 400：
+             * <pre>
+             *   400 InvalidParameter: batch size is invalid, it should not be larger than 10.
+             * </pre>
+             * 所以这里取"所有已知厂商都安全"的最小值；各家上限写在预设的
+             * {@code embedding-max-batch} 里，由 {@code CloudEndpointResolver}
+             * 取"配置值与厂商上限的较小者"，用户想为了提速调大也不会越界。
              */
-            private int batchSize = 16;
+            private int batchSize = 10;
 
             public String getProvider() {
                 return provider;
@@ -774,6 +781,15 @@ public class QaProperties {
             /** 向量模型 → 维度。用于切模型时的维度校验与界面提示。 */
             private Map<String, Integer> embeddingDimensions = new LinkedHashMap<>();
 
+            /**
+             * 该厂商向量接口单次能提交的最大条数；未知则留空。
+             *
+             * <p>这是"厂商差异"的又一处硬限制：百炼 {@code text-embedding-v4} 是 10，
+             * 智谱 {@code embedding-3} 是 64，混元只收 input/model 两个参数。
+             * 写进预设后，用户换厂商不必去翻文档，也不会因为超限而在入库时吃 400。
+             */
+            private Integer embeddingMaxBatch;
+
             /** 该厂商的注意事项（界面提示用），例如"无 embedding 接口"。 */
             private String notes;
 
@@ -834,6 +850,14 @@ public class QaProperties {
 
             public void setEmbeddingDimensions(Map<String, Integer> embeddingDimensions) {
                 this.embeddingDimensions = embeddingDimensions;
+            }
+
+            public Integer getEmbeddingMaxBatch() {
+                return embeddingMaxBatch;
+            }
+
+            public void setEmbeddingMaxBatch(Integer embeddingMaxBatch) {
+                this.embeddingMaxBatch = embeddingMaxBatch;
             }
 
             public String getNotes() {

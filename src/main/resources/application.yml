@@ -107,8 +107,12 @@ qa:
       #    可选：2048 / 1536 / 1024 / 768 / 512 / 256 / 128 / 64。
       #    想免重建就把 provider 换成 siliconflow（Qwen3-Embedding-4B，2560 维，与本地同源同维）。
       dimension: 1024
-      # 云端有限流（百炼 text-embedding-v4：1800 RPM / 120 万 TPM），入库必须分批
-      batch-size: 16
+      # 云端向量接口单次提交条数。
+      # ⚠️ 实测：配 16 时入库直接 400 —— 百炼 text-embedding-v4 单次最多 10 条：
+      #    InvalidParameter: batch size is invalid, it should not be larger than 10.
+      # 各厂商上限写在预设的 embedding-max-batch 里，实际取"配置值与上限的较小者"，
+      # 所以这里可以按需调大（换到上限更高的厂商时），不会越界。
+      batch-size: 10
       timeout: 60s
       max-retries: 2
 
@@ -149,7 +153,34 @@ qa:
         embedding-dimensions:
           text-embedding-v4: 1024
           text-embedding-v3: 1024
+        # 实测上限：text-embedding-v4 单次最多 10 条，超了报
+        #   "batch size is invalid, it should not be larger than 10."
+        embedding-max-batch: 10
         notes: API Key 与地域绑定，跨地域调用报 401（不是 Key 失效）；messages 仅第 0 条可为 system 且最后一条必须是 user；限流按主账号合并计算
+
+      siliconflow:
+        label: 硅基流动 SiliconFlow
+        api-key-env: SILICONFLOW_API_KEY
+        base-url: https://api.siliconflow.cn/v1
+        chat-models:
+          - deepseek-ai/DeepSeek-V4-Flash
+          - Pro/deepseek-ai/DeepSeek-R1
+        embedding-models:
+          - Qwen/Qwen3-Embedding-4B
+          - Qwen/Qwen3-Embedding-8B
+          - BAAI/bge-m3
+        # ⚠️ 这个 2560 不是厂商默认值，而是**我们必须显式指定**的值：
+        #    官方 API 文档没有标注各 embedding 模型的默认维度（只给了最大输入 token），
+        #    dimensions 参数仅 Qwen/Qwen3 系列支持（4B 可选 64~2560，8B 可选 64~4096）。
+        #    写它的理由是：本地 qa-embed:4b 就是 Qwen3-Embedding-4B（2560 维），
+        #    要求云端同样输出 2560 维，两边才可能落在同一向量空间、切换免重建索引。
+        #    "可能"二字是刻意的 —— 是否真的同源同维必须实测比对向量，不能只信文档。
+        embedding-dimensions:
+          Qwen/Qwen3-Embedding-4B: 2560
+          Qwen/Qwen3-Embedding-8B: 4096
+        thinking-off-params:
+          enable_thinking: false
+        notes: 官方未标注部分 embedding 模型的默认维度，务必显式配 dimension；Qwen3 系列支持 dimensions 参数；另有 thinking_budget / reasoning_effort / min_p 等扩展参数
 
   ingest:
     chunk-size: 500

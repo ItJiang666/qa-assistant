@@ -1,5 +1,7 @@
 package com.itjiang.qa.service;
 
+import com.itjiang.qa.common.BusinessException;
+import com.itjiang.qa.common.ErrorCode;
 import com.itjiang.qa.config.DataDirInitializer;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
@@ -90,8 +92,33 @@ public class VectorStoreService {
                 .minScore(minScore)
                 .build();
 
-        EmbeddingSearchResult<TextSegment> result = store.search(request);
+        EmbeddingSearchResult<TextSegment> result;
+        try {
+            result = store.search(request);
+        } catch (IllegalArgumentException ex) {
+            // 维度不一致时 LangChain4j 会抛：
+            //   "Length of vector a (2560) must be equal to the length of vector b (1024)"
+            // 裸抛出去只会变成"系统内部错误"，用户完全不知道该怎么办。这里翻译成可行动的话。
+            // 成因只有一个：索引是用某个向量模型建的，而现在换了另一个（维度或向量空间不同）。
+            throw new BusinessException(ErrorCode.INDEX_MODEL_MISMATCH, indexMismatchMessage(ex));
+        }
         return result.matches().stream().map(this::toHit).toList();
+    }
+
+    /**
+     * 把维度不一致的技术异常翻译成用户能照做的提示。
+     *
+     * <p>提示里必须包含三样：**发生了什么**、**为什么**、**点哪里能修**。
+     * 只说"维度不一致"等于把排查成本转嫁给用户。
+     *
+     * @param ex 原始异常
+     * @return 可读提示
+     */
+    private String indexMismatchMessage(IllegalArgumentException ex) {
+        return "向量索引与当前向量模型不匹配：" + ex.getMessage()
+                + "。说明索引是用另一个向量模型建立的，检索无法进行。"
+                + "请在「文档管理」页点击「重建索引」，用当前模型重新生成全部向量后再提问"
+                + "（若刚刚切换过本地/云端模式，切换向量模型都会导致这个情况）。";
     }
 
     /**

@@ -5,6 +5,7 @@ import com.itjiang.qa.config.QaProperties;
 import com.itjiang.qa.mapper.DocumentMapper;
 import com.itjiang.qa.model.entity.Document;
 import com.itjiang.qa.model.enums.DocStatus;
+import com.itjiang.qa.provider.RuntimeModelRegistry;
 import com.itjiang.qa.rag.ChineseDocumentSplitters;
 import com.itjiang.qa.rag.SegmentMetadata;
 import dev.langchain4j.data.document.BlankDocumentException;
@@ -68,17 +69,20 @@ public class DocumentIngestService {
     private final DocumentMapper documentMapper;
     private final QaProperties properties;
     private final DataDirInitializer dirs;
+    private final RuntimeModelRegistry modelRegistry;
 
     public DocumentIngestService(@Qualifier("qaEmbeddingModel") EmbeddingModel embeddingModel,
                                  VectorStoreService vectorStoreService,
                                  DocumentMapper documentMapper,
                                  QaProperties properties,
-                                 DataDirInitializer dirs) {
+                                 DataDirInitializer dirs,
+                                 RuntimeModelRegistry modelRegistry) {
         this.embeddingModel = embeddingModel;
         this.vectorStoreService = vectorStoreService;
         this.documentMapper = documentMapper;
         this.properties = properties;
         this.dirs = dirs;
+        this.modelRegistry = modelRegistry;
     }
 
     /**
@@ -134,6 +138,11 @@ public class DocumentIngestService {
             // ── [6] 入库 + 落盘 ───────────────────────────────────────
             vectorStoreService.add(embeddings, segments);
             documentMapper.markIndexed(documentId, segments.size());
+            // 把"这些向量到底是哪个模型生成的"写回数据库：
+            // 全量重建索引时会用当前模型重灌，若不同步这两列，界面与后续一致性检查都会基于旧模型名得出错误结论
+            String embeddingModelName = modelRegistry.embeddingModelName();
+            documentMapper.updateIndexIdentity(documentId, embeddingModelName,
+                    "qa_" + embeddingModelName.replaceAll("[^A-Za-z0-9]", "_"));
             vectorStoreService.persist();
 
             log.info("入库完成: id={}, file={}, 分块 {}，耗时 {} ms",

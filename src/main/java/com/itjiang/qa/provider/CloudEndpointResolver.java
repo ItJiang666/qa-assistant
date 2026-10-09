@@ -70,6 +70,27 @@ public class CloudEndpointResolver {
     }
 
     /**
+     * 向量接口的**实际**批大小。
+     *
+     * <p>取"用户配置值"与"厂商上限"的较小者：
+     * <ul>
+     *   <li>用户想为了提速把 batch-size 调大 —— 允许，但不会越过厂商上限</li>
+     *   <li>厂商没声明上限（预设留空）—— 以用户配置为准</li>
+     *   <li>厂商上限比配置还小（百炼 10 vs 用户配了 16）—— 自动降到 10，
+     *       因为超限不是"慢一点"，而是<b>直接 400 入库失败</b></li>
+     * </ul>
+     *
+     * @return 实际可用的批大小，至少为 1
+     */
+    public int embeddingBatchSize() {
+        int configured = properties.getCloud().getEmbedding().getBatchSize();
+        QaProperties.Cloud.Preset preset = preset(properties.getCloud().getEmbedding().getProvider());
+        Integer vendorMax = preset == null ? null : preset.getEmbeddingMaxBatch();
+        int effective = vendorMax == null ? configured : Math.min(configured, vendorMax);
+        return Math.max(effective, 1);
+    }
+
+    /**
      * 解析对话端点。
      *
      * @return 解析结果

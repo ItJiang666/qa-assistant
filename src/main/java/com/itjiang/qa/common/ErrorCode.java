@@ -37,6 +37,14 @@ public enum ErrorCode {
     DOC_PARSE_EMPTY(1004, "解析结果为空，可能是扫描版 PDF（需 OCR，本期不支持）", HttpStatus.UNPROCESSABLE_ENTITY),
     /** 入库流水线失败。 */
     DOC_INGEST_FAILED(1005, "文档入库失败", HttpStatus.INTERNAL_SERVER_ERROR),
+    /**
+     * 向量索引与当前向量模型不匹配。
+     *
+     * <p>单独立一个码而不是复用"参数不合法"：前端要据此在界面上给出「重建索引」入口，
+     * 而参数错误是用户改输入就能解决的，两者处置方式完全不同。
+     * HTTP 用 422：请求本身没错，是服务端的数据状态与当前配置不一致。
+     */
+    INDEX_MODEL_MISMATCH(1006, "向量索引与当前向量模型不匹配，请重建索引", HttpStatus.UNPROCESSABLE_ENTITY),
 
     // ── 2xxx 问答 ───────────────────────────────────────────────────────────
     /** 问题为空。 */

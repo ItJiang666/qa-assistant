@@ -129,9 +129,11 @@ public class CloudModelProvider implements ModelProvider {
         CloudEndpointResolver.ResolvedEndpoint endpoint = resolver.embedding();
         requireUsable(endpoint, "向量");
         QaProperties.Cloud.Embedding cfg = properties.getCloud().getEmbedding();
-        log.info("装配云端向量模型: {} @ {} (provider={}, 维度={}, 批大小={})",
+        int batchSize = resolver.embeddingBatchSize();
+        log.info("装配云端向量模型: {} @ {} (provider={}, 维度={}, 批大小={}{})",
                 endpoint.model(), endpoint.baseUrl(), endpoint.providerId(),
-                endpoint.dimension() == null ? "未声明" : endpoint.dimension(), cfg.getBatchSize());
+                endpoint.dimension() == null ? "未声明" : endpoint.dimension(), batchSize,
+                batchSize == cfg.getBatchSize() ? "" : "（已按厂商上限从 " + cfg.getBatchSize() + " 下调）");
 
         OpenAiEmbeddingModel.OpenAiEmbeddingModelBuilder builder = OpenAiEmbeddingModel.builder()
                 .baseUrl(endpoint.baseUrl())
@@ -139,8 +141,8 @@ public class CloudModelProvider implements ModelProvider {
                 .modelName(endpoint.model())
                 .timeout(timeout(cfg.getTimeout()))
                 .maxRetries(cfg.getMaxRetries())
-                // 云端有限流：一份上百片段的文档一次性发过去必然 429，必须分批
-                .maxSegmentsPerBatch(cfg.getBatchSize());
+                // 云端有限制：一份上百片段的文档一次性发过去会 400/429，必须分批
+                .maxSegmentsPerBatch(batchSize);
         if (endpoint.dimension() != null) {
             // 部分模型（如百炼 text-embedding-v4）支持指定输出维度。
             // 对不支持该参数的模型，OpenAI 协议允许忽略，故只在显式声明时才带上。

@@ -59,6 +59,13 @@
         WHERE id = #{id}
     </update>
 
+    <update id="updateIndexIdentity">
+        UPDATE qa_document
+        SET embedding_model = #{embeddingModel}, collection_name = #{collectionName},
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = #{id}
+    </update>
+
     <update id="markFailed">
         UPDATE qa_document
         SET status = 'FAILED', error_message = #{errorMessage}, updated_at = CURRENT_TIMESTAMP

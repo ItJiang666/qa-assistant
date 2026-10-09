@@ -4,7 +4,7 @@ import com.itjiang.qa.config.QaProperties;
 import com.itjiang.qa.context.UserContext;
 import com.itjiang.qa.mapper.DocumentMapper;
 import com.itjiang.qa.model.dto.SystemStatusResponse;
-import com.itjiang.qa.model.enums.RunMode;
+import com.itjiang.qa.provider.RuntimeModelRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.env.Environment;
@@ -34,28 +34,36 @@ public class SystemStatusService {
     private final DocumentMapper documentMapper;
     private final JdbcTemplate jdbcTemplate;
     private final Environment environment;
+    private final RuntimeModelRegistry modelRegistry;
 
     public SystemStatusService(QaProperties properties,
                                DocumentMapper documentMapper,
                                JdbcTemplate jdbcTemplate,
-                               Environment environment) {
+                               Environment environment,
+                               RuntimeModelRegistry modelRegistry) {
         this.properties = properties;
         this.documentMapper = documentMapper;
         this.jdbcTemplate = jdbcTemplate;
         this.environment = environment;
+        this.modelRegistry = modelRegistry;
     }
 
     /**
      * 汇总当前系统状态。
+     *
+     * <p><b>模式与模型名必须问注册表，不能读 {@code qa.local.*}。</b> P4 之前这里直接读
+     * 本地配置是成立的（那时只有一个模式）；现在对话模式可以在运行时切换，
+     * 继续读本地配置就会出现"界面说本地 qwen3.5:9b、实际请求发给 DeepSeek"这种
+     * 自相矛盾的状态 —— 界面上撒谎比报错更难发现。
      *
      * @return 系统状态快照
      */
     public SystemStatusResponse currentStatus() {
         String userId = UserContext.get();
         return new SystemStatusResponse(
-                RunMode.from(properties.getMode()).getValue(),
-                properties.getLocal().getChatModel(),
-                properties.getLocal().getEmbeddingModel(),
+                modelRegistry.chatMode().value(),
+                modelRegistry.chatModelName(),
+                modelRegistry.embeddingModelName(),
                 properties.getLocal().getNumCtx(),
                 properties.dataPath().toAbsolutePath().normalize().toString(),
                 detectDatabase(),
