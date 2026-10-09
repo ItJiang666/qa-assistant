@@ -11,6 +11,7 @@ import dev.langchain4j.store.embedding.EmbeddingStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -79,15 +80,20 @@ public class RecordingContentRetriever implements ContentRetriever {
     /** 用全局配置构建的检索器；无覆盖时直接复用它。 */
     private final ContentRetriever defaultRetriever;
 
+    /** 查询改写器；为 {@code null} 时退化为单路检索。 */
+    private final QueryExpander queryExpander;
+
     public RecordingContentRetriever(EmbeddingStore<TextSegment> embeddingStore,
                                      EmbeddingModel embeddingModel,
                                      int defaultTopK,
-                                     double defaultMinScore) {
+                                     double defaultMinScore,
+                                     QueryExpander queryExpander) {
         this.embeddingStore = embeddingStore;
         this.embeddingModel = embeddingModel;
         this.defaultTopK = defaultTopK;
         this.defaultMinScore = defaultMinScore;
         this.defaultRetriever = build(defaultTopK, defaultMinScore);
+        this.queryExpander = queryExpander;
     }
 
     /**
@@ -116,7 +122,7 @@ public class RecordingContentRetriever implements ContentRetriever {
 
     @Override
     public List<Content> retrieve(Query query) {
-        List<Content> contents = delegate().retrieve(query);
+        List<Content> contents = retrieveWithExpansion(query);
 
         // ★ 检索为空时注入一条"占位资料"，这一步是防幻觉的关键。
         //
@@ -138,6 +144,51 @@ public class RecordingContentRetriever implements ContentRetriever {
                 query.text(), contents == null ? 0 : contents.size(),
                 (contents == null || contents.isEmpty()) ? "（已注入空资料占位符）" : "");
         return effective;
+    }
+
+    /**
+     * 查询改写 + 多路检索 + 轮转合并。
+     *
+     * <p>改写是<b>可选增强</b>，因此这里有三条降级路径，保证主链路永远不会因为它而失败：
+     * 没配改写器 → 单路；改写只返回原问题 → 单路；某一路检索抛异常 → 跳过那一路。
+     *
+     * @param query 原始查询（含框架传下来的 metadata，改写式必须继承它）
+     * @return 合并后的检索结果
+     */
+    private List<Content> retrieveWithExpansion(Query query) {
+        ContentRetriever retriever = delegate();
+        if (queryExpander == null) {
+            return retriever.retrieve(query);
+        }
+
+        List<String> queries = queryExpander.expand(query.text());
+        if (queries.size() <= 1) {
+            return retriever.retrieve(query);
+        }
+
+        List<List<Content>> ranked = new ArrayList<>(queries.size());
+        for (String expanded : queries) {
+            try {
+                // 继承原查询的 metadata（里面带着会话 ID 等框架上下文），只换文本
+                ranked.add(retriever.retrieve(Query.from(expanded, query.metadata())));
+            } catch (Exception ex) {
+                log.warn("多路检索中有一路失败，已跳过: query='{}', 原因={}", expanded, ex.getMessage());
+            }
+        }
+        List<Content> merged = RoundRobinMerge.merge(ranked, effectiveTopK(),
+                content -> content.textSegment() == null ? null : content.textSegment().text());
+        log.debug("多路检索: {} 路 → 合并去重后 {} 条", queries.size(), merged.size());
+        return merged;
+    }
+
+    /**
+     * 取本次请求生效的 topK（考虑了请求级覆盖）。
+     *
+     * @return 生效条数
+     */
+    private int effectiveTopK() {
+        Overrides overrides = OVERRIDES.get();
+        return overrides == null || overrides.topK() == null ? defaultTopK : overrides.topK();
     }
 
     /**

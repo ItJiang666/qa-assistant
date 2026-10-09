@@ -205,15 +205,88 @@ public class QaProperties {
      */
     public static class Retrieval {
 
-        /** 检索返回的最相似片段数量。 */
-        private int topK = 4;
+        /**
+         * 检索返回的最相似片段数量。
+         *
+         * <p>默认 <b>8</b>：由召回评测测出来的拐点（topK=4 命中 79%、6→86%、8→93%、
+         * 12 与 20 不再提升）。上限受开发文档 2.2 约束（单次问答检索 topK ≤ 10）。
+         */
+        private int topK = 8;
 
         /**
          * 相似度阈值，低于它的片段不交给模型。
          *
-         * <p>这是防幻觉的第一道闸门：宁可回答"资料里没有"，也不要拿不相干的片段硬编。
+         * <p>它是防幻觉的第一道闸门：低于阈值的片段不进 Prompt，
+         * 从而触发"空资料占位符"这条路径。但实测它**几乎不起过滤作用**
+         * （命中分数普遍 0.76~0.87，0.6/0.5/0.45/0.4 四档结果完全相同），
+         * 真正影响召回的是 {@link #topK}。保留它的理由是它是"检索为空"的开关。
          */
         private double minScore = 0.6;
+
+        private QueryExpansion queryExpansion = new QueryExpansion();
+
+        /**
+         * 查询改写（Query Expansion）。
+         *
+         * <h2>它解决的是哪一类问题</h2>
+         * <p>不是"检索算得不准"，而是<b>提问用词与文档用词对不上</b>：
+         * 实测里唯一一个怎么放大召回都捞不到的探针，是"检索为空时怎么防止模型乱答" ——
+         * 文档里写的是"空资料占位符""防幻觉"，压根没有"乱答"这两个字。
+         * 向量检索对这种"同义不同词"无能为力，而让模型先把问题改写成文档可能使用的说法，
+         * 是最直接的解法。
+         *
+         * <h2>代价（必须知道）</h2>
+         * <p>每个问题多一次小模型调用：本地约 0.3~0.6 秒，云端约 0.2~0.5 秒，并产生少量 token 费用。
+         * 因此单独给一个开关，量出收益不划算时可以立刻关掉。
+         */
+        public static class QueryExpansion {
+
+            /**
+             * 是否启用。
+             *
+             * <p><b>默认关闭 —— 这是评测结论，不是保守。</b>
+             * 15 个探针开/关对照，命中率完全一样，而检索耗时约 3 倍（395ms → 1186ms）。
+             * 追查后发现唯一那条漏检是"内容根本不在知识库里"（库里那份 docx 是旧版本），
+             * 即对库里确实存在的内容，单路检索已经全部命中 ——
+             * 改写救不了"库里没有的内容"，在这个知识库上它只是纯开销。
+             *
+             * <p>但它的适用场景真实存在（文档用词与用户口语差距大、或换一批文档），
+             * 所以实现与开关都留着：开启前先用 {@code /api/v1/documents/search}
+             * 传 {@code expand=true} 量一遍增益再决定。
+             */
+            private boolean enabled = false;
+
+            /**
+             * 额外生成几条改写式（不含原问题）。
+             *
+             * <p>默认 2：加上原问题共 3 路检索。再多收益递减，而每次都多花一次调用。
+             */
+            private int extraQueries = 2;
+
+            public boolean isEnabled() {
+                return enabled;
+            }
+
+            public void setEnabled(boolean enabled) {
+                this.enabled = enabled;
+            }
+
+            public int getExtraQueries() {
+                return extraQueries;
+            }
+
+            public void setExtraQueries(int extraQueries) {
+                this.extraQueries = extraQueries;
+            }
+        }
+
+        public QueryExpansion getQueryExpansion() {
+            return queryExpansion;
+        }
+
+        public void setQueryExpansion(QueryExpansion queryExpansion) {
+            this.queryExpansion = queryExpansion;
+        }
 
         public int getTopK() {
             return topK;

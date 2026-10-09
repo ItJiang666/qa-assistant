@@ -1,7 +1,9 @@
 package com.itjiang.qa.config;
 
+import com.itjiang.qa.rag.QueryExpander;
 import com.itjiang.qa.rag.RecordingContentRetriever;
 import dev.langchain4j.data.segment.TextSegment;
+import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.rag.content.retriever.ContentRetriever;
 import dev.langchain4j.store.embedding.EmbeddingStore;
@@ -50,22 +52,52 @@ public class RagConfig {
      * <p>外面包了一层 {@link RecordingContentRetriever}：框架只负责把检索结果注入 Prompt，
      * 不会回传给调用方，而我们需要把它作为"引用来源"返回给前端。
      *
+     * <p><b>P4 追加：查询改写。</b> 召回评测显示，把 topK 提到 8 之后仍有约 7% 的问题
+     * 检索不到，而原因不是"算得不准"，是"提问用词与文档用词对不上"（用户说"乱答"、
+     * 文档写"防幻觉"）。这类只能靠改写解决：先把问题改写成文档可能使用的说法，
+     * 再多路检索、轮转合并。改写器用问答模型（不是抽取模型 —— 后者带 JSON 模式，
+     * 会把改写结果变成 JSON，反而解析不了）。
+     *
      * @param store      向量库
      * @param model      向量模型
-     * @param properties 应用配置（topK / minScore）
-     * @return 带记录能力的检索器
+     * @param properties 应用配置（topK / minScore / 查询改写开关）
+     * @param chatModel  改写用的对话模型（与回答同一个模型来源）
+     * @return 带记录能力与查询改写的检索器
      */
     @Bean("qaContentRetriever")
     public ContentRetriever qaContentRetriever(EmbeddingStore<TextSegment> store,
                                                @Qualifier("qaEmbeddingModel") EmbeddingModel model,
-                                               QaProperties properties) {
+                                               QaProperties properties,
+                                               QueryExpander queryExpander) {
         int topK = properties.getRetrieval().getTopK();
         double minScore = properties.getRetrieval().getMinScore();
-        log.info("检索器就绪: topK={}, minScore={}（低于阈值的结果不会交给模型）", topK, minScore);
+        QaProperties.Retrieval.QueryExpansion expansion = properties.getRetrieval().getQueryExpansion();
+        log.info("检索器就绪: topK={}, minScore={}, 查询改写={}{}（低于阈值的结果不会交给模型）",
+                topK, minScore, expansion.isEnabled() ? "开" : "关",
+                expansion.isEnabled() ? "（额外 " + expansion.getExtraQueries() + " 条改写式）" : "");
 
         // 把向量库与向量模型直接交给装饰器：请求级覆盖（ChatRequest.topK/minScore）
         // 需要按新参数临时另建检索器，因此它必须自己持有这两个依赖
-        return new RecordingContentRetriever(store, model, topK, minScore);
+        return new RecordingContentRetriever(store, model, topK, minScore, queryExpander);
+    }
+
+    /**
+     * 查询改写器。
+     *
+     * <p>做成 Bean 由检索器与"检索试跑接口"共用：评测时跑的必须是<b>与线上同一套</b>
+     * 改写与合并逻辑，否则量出来的增益不作数。
+     *
+     * <p>用问答模型而不是抽取模型：抽取模型带 {@code response_format: json_object}，
+     * 会把改写结果也变成 JSON，按行解析直接失效。
+     *
+     * @param chatModel  对话模型（跟随运行时模式）
+     * @param properties 应用配置（开关与改写条数）
+     * @return 改写器
+     */
+    @Bean
+    public QueryExpander queryExpander(@Qualifier("qaChatModel") ChatModel chatModel,
+                                       QaProperties properties) {
+        return new QueryExpander(chatModel, properties);
     }
 
     /**
