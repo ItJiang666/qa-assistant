@@ -1,6 +1,8 @@
 package com.itjiang.qa.assistant;
 
+import dev.langchain4j.service.MemoryId;
 import dev.langchain4j.service.SystemMessage;
+import dev.langchain4j.service.TokenStream;
 import dev.langchain4j.service.UserMessage;
 import dev.langchain4j.service.spring.AiService;
 import dev.langchain4j.service.spring.AiServiceWiringMode;
@@ -32,7 +34,8 @@ import dev.langchain4j.service.spring.AiServiceWiringMode;
 @AiService(
         wiringMode = AiServiceWiringMode.EXPLICIT,
         chatModel = "qaChatModel",
-        streamingChatModel = "qaStreamingChatModel"
+        streamingChatModel = "qaStreamingChatModel",
+        chatMemoryProvider = "qaChatMemoryProvider"
 )
 public interface QaAssistant {
 
@@ -67,12 +70,29 @@ public interface QaAssistant {
     /**
      * 单轮问答（同步）。
      *
-     * <p>P1b 阶段会加上 {@code @MemoryId} 与会话记忆；
-     * P3 阶段补上 {@code contentRetriever}；P3.5 补上长期记忆变量。
+     * <p>{@code @MemoryId} 让框架按会话隔离记忆：同一个 conversationId 的历史会被带进
+     * 本次请求的上下文，不同会话互不干扰。记忆的持久化由 {@code JdbcChatMemoryStore} 负责。
      *
-     * @param question 用户问题
+     * <p>P3 阶段补上 {@code contentRetriever}；P3.5 补上长期记忆变量。
+     *
+     * @param conversationId 会话 ID（记忆隔离的键）
+     * @param question       用户问题
      * @return 模型回答
      */
     @SystemMessage(SYSTEM_MESSAGE)
-    String chat(@UserMessage String question);
+    String chat(@MemoryId String conversationId, @UserMessage String question);
+
+    /**
+     * 单轮问答（流式，{@code /api/v1/chat/stream} 使用）。
+     *
+     * <p>返回 {@code TokenStream} 而非直接吐文本：调用方需要挂上"逐字回调"、
+     * "完成回调"和"错误回调"三个钩子 —— 尤其是完成回调，
+     * 它是在流式场景下把回答落库的唯一时机。
+     *
+     * @param conversationId 会话 ID
+     * @param question       用户问题
+     * @return token 流，需由调用方 {@code .start()} 触发
+     */
+    @SystemMessage(SYSTEM_MESSAGE)
+    TokenStream chatStream(@MemoryId String conversationId, @UserMessage String question);
 }

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<!--
+  消息表映射。
+
+  ⚠️ selectByConversation 必须按 id 升序：
+     它同时是 L2 会话记忆的读取入口，顺序错了模型看到的对话就是倒着的，
+     而且不会报错 —— 只会表现为"答非所问"，极难排查。
+-->
+<mapper namespace="com.itjiang.qa.mapper.MessageMapper">
+
+    <sql id="columns">
+        id, conversation_id, role, content, sources_json, token_usage, created_at
+    </sql>
+
+    <!-- useGeneratedKeys 回填主键：调用方可能需要知道刚写入的 id -->
+    <insert id="insert" parameterType="com.itjiang.qa.model.entity.Message"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO qa_message (conversation_id, role, content, sources_json, token_usage, created_at)
+        VALUES (#{conversationId}, #{role}, #{content}, #{sourcesJson}, #{tokenUsage}, CURRENT_TIMESTAMP)
+    </insert>
+
+    <select id="selectByConversation" resultType="com.itjiang.qa.model.entity.Message">
+        SELECT <include refid="columns"/>
+        FROM qa_message
+        WHERE conversation_id = #{conversationId}
+        ORDER BY id ASC
+    </select>
+
+    <select id="countByConversation" resultType="long">
+        SELECT COUNT(*)
+        FROM qa_message
+        WHERE conversation_id = #{conversationId}
+    </select>
+
+    <delete id="deleteByConversation">
+        DELETE FROM qa_message
+        WHERE conversation_id = #{conversationId}
+    </delete>
+
+</mapper>
