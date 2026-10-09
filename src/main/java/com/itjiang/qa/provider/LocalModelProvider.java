@@ -1,5 +1,6 @@
 package com.itjiang.qa.provider;
 
+import com.itjiang.qa.config.DurationParser;
 import com.itjiang.qa.config.NumCtxResolver;
 import com.itjiang.qa.config.QaProperties;
 import dev.langchain4j.model.chat.ChatModel;
@@ -33,6 +34,9 @@ import java.time.Duration;
 public class LocalModelProvider implements ModelProvider {
 
     private static final Logger log = LoggerFactory.getLogger(LocalModelProvider.class);
+
+    /** 本地模式超时回退值：模型冷启动本身就要几秒，给太短会把"正在加载"误判成失败。 */
+    private static final Duration LOCAL_TIMEOUT_FALLBACK = Duration.ofSeconds(120);
 
     private final QaProperties properties;
     private final NumCtxResolver numCtxResolver;
@@ -140,38 +144,37 @@ public class LocalModelProvider implements ModelProvider {
     }
 
     /**
+     * 对话模型名（界面显示用）。
+     *
+     * <p>之所以要这个方法：状态接口与界面只说"当前是本地模式"还不够，
+     * 用户会想知道"具体是哪个模型在回答"，尤其是切了模型之后。
+     *
+     * @return Ollama 里的模型名
+     */
+    public String chatModelName() {
+        return properties.getLocal().getChatModel();
+    }
+
+    /**
+     * 向量模型名（界面显示用）。
+     *
+     * @return Ollama 里的向量模型名
+     */
+    public String embeddingModelName() {
+        return properties.getLocal().getEmbeddingModel();
+    }
+
+    /**
      * 解析超时配置。
      *
-     * <p>支持两种写法：ISO-8601（{@code PT120S}）与简洁写法（{@code 120s} / {@code 5000ms}）。
-     * 简洁写法对人更友好，这里手工解析；解析不了就回退到 120 秒，
-     * 因为一个坏掉的超时值不该让整个应用起不来。
+     * <p>解析逻辑已抽到 {@link DurationParser}（云端供应商同样要用），
+     * 这里只负责给出本地模式的回退值：120 秒 —— 本地模型冷启动本身就要几秒，
+     * 超时给太短会把"正在加载模型"误判成失败。
      *
      * @param raw 配置原文
      * @return 解析后的时长
      */
     private Duration parseTimeout(String raw) {
-        Duration fallback = Duration.ofSeconds(120);
-        if (raw == null || raw.isBlank()) {
-            return fallback;
-        }
-        String value = raw.trim().toLowerCase();
-        try {
-            if (value.startsWith("pt")) {
-                return Duration.parse(raw.trim().toUpperCase());
-            }
-            if (value.endsWith("ms")) {
-                return Duration.ofMillis(Long.parseLong(value.substring(0, value.length() - 2).trim()));
-            }
-            if (value.endsWith("s")) {
-                return Duration.ofSeconds(Long.parseLong(value.substring(0, value.length() - 1).trim()));
-            }
-            if (value.endsWith("m")) {
-                return Duration.ofMinutes(Long.parseLong(value.substring(0, value.length() - 1).trim()));
-            }
-            return Duration.ofSeconds(Long.parseLong(value));
-        } catch (Exception ex) {
-            log.warn("无法解析超时配置 '{}'，回退为 {} 秒", raw, fallback.toSeconds());
-            return fallback;
-        }
+        return DurationParser.parse(raw, LOCAL_TIMEOUT_FALLBACK);
     }
 }

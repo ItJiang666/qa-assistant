@@ -105,6 +105,16 @@
             <artifactId>langchain4j-ollama</artifactId>
         </dependency>
         <!--
+          云端：OpenAI 兼容协议实现（P4）。国内主流厂商（DeepSeek / 百炼 / 硅基流动 /
+          智谱 / Kimi / 方舟 / 混元 / MiniMax / 阶跃 / 千帆）都提供 OpenAI 兼容端点，
+          因此一套实现即可接多家，差异只在 base-url + 模型名 + 鉴权。
+          ⚠️ 协议不兼容的（讯飞星火、文心旧版签名鉴权）不在支持范围，扩展点见 CloudModelProvider。
+        -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-open-ai</artifactId>
+        </dependency>
+        <!--
           文档解析：Tika 一份依赖覆盖 txt / md / docx / pdf / xlsx / html（开发文档 3.2）。
           ⚠️ 版本号要写 beta 线：这个模块不在 langchain4j-bom 的管理范围内，
              它跟随 starter 的版本（1.20.2-beta30）。写 1.20.2 会直接拉不到 ——

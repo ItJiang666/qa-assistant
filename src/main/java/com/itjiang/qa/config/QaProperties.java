@@ -3,6 +3,10 @@ package com.itjiang.qa.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * qa-assistant 全部可配置项，统一绑定 {@code qa.*}（开发文档 10.5）。
@@ -436,45 +440,152 @@ public class QaProperties {
     }
 
     /**
-     * 云端模型参数（决策 3/4：本期只留骨架，P4 才联调）。
+     * 云端模型参数（P4）。
+     *
+     * <h2>为什么对话与向量各自独立配一套</h2>
+     * <p>因为它们<b>必然来自不同厂商</b>：DeepSeek 没有 embedding 接口（实测 404），
+     * 云端模式下向量只能另找一家。所以这里是两个平行的端点配置，而不是"选一个厂商"。
+     *
+     * <h2>预设（preset）+ 覆盖（override）</h2>
+     * <p>国内厂商的差异只有三样：base-url、模型名、Key 所在的环境变量。
+     * 与其让用户每次手填，不如内置一份预设表（{@code qa.cloud.presets}），
+     * 用户只写 {@code provider: deepseek}；某一项要特殊处理时再单独覆盖。
+     * <b>留空 = 用预设值，填了 = 以填的为准</b>，这条规则只在
+     * {@code CloudEndpointResolver} 一处实现，别处不许再判断。
+     *
+     * <p><b>为什么 Key 只从环境变量取：</b>仓库与数据库都不该出现密钥（开发文档 12.4 红线）。
+     * 预设里只写"该读哪个环境变量"（{@code api-key-env}），值永远来自运行环境；
+     * 界面上只显示"已配置 / 未配置"，不回显内容。
      */
     public static class Cloud {
 
-        /** 对话模型配置。 */
-        private Endpoint chat = new Endpoint();
+        /** 对话端点。 */
+        private Chat chat = new Chat();
+
+        /** 向量端点。 */
+        private Embedding embedding = new Embedding();
 
         /**
-         * 向量模型配置。
+         * 厂商预设表：id → 端点默认值。
          *
-         * <p>必须与对话分开配：DeepSeek 没有 embedding 接口（实测 404），
-         * 云端模式下向量只能另找一家。
+         * <p>用 {@code LinkedHashMap} 保持 YAML 里的书写顺序 —— 界面的厂商下拉框
+         * 直接按这个顺序展示，常用厂商排在前面靠配置顺序控制即可。
          */
-        private Endpoint embedding = new Endpoint();
+        private Map<String, Preset> presets = new LinkedHashMap<>();
 
-        public Endpoint getChat() {
+        public Chat getChat() {
             return chat;
         }
 
-        public void setChat(Endpoint chat) {
+        public void setChat(Chat chat) {
             this.chat = chat;
         }
 
-        public Endpoint getEmbedding() {
+        public Embedding getEmbedding() {
             return embedding;
         }
 
-        public void setEmbedding(Endpoint embedding) {
+        public void setEmbedding(Embedding embedding) {
             this.embedding = embedding;
         }
 
-        /**
-         * 一个 OpenAI 兼容端点。
-         */
-        public static class Endpoint {
+        public Map<String, Preset> getPresets() {
+            return presets;
+        }
 
+        public void setPresets(Map<String, Preset> presets) {
+            this.presets = presets;
+        }
+
+        /**
+         * 对话端点（OpenAI 兼容）。
+         */
+        public static class Chat {
+
+            /** 厂商预设 id，对应 {@code qa.cloud.presets} 的键。 */
+            private String provider = "deepseek";
+
+            /** base-url 覆盖值；留空用预设。 */
             private String baseUrl;
+
+            /** 模型名覆盖值；留空用预设。 */
             private String model;
+
+            /** Key 覆盖值；留空则按预设的 {@code api-key-env} 读环境变量。 */
             private String apiKey;
+
+            /**
+             * 单次请求超时。
+             *
+             * <p>默认 60s，比本地的 120s 短：云端超时通常意味着网络问题或服务异常，
+             * 让用户早一点看到明确错误，比干等两分钟强。
+             */
+            private String timeout = "60s";
+
+            /**
+             * 失败重试次数（指数退避）。
+             *
+             * <p>比本地的 1 次多：云端会因限流返回 429，这类失败重试一下往往就好了；
+             * 本地失败几乎都是"Ollama 没启动"，重试没有意义。
+             */
+            private int maxRetries = 2;
+
+            /** 单次回答 token 上限，语义与 {@code qa.local.max-output-tokens} 一致。 */
+            private int maxOutputTokens = 1024;
+
+            /**
+             * 抽取模型是否要求 JSON 输出（{@code response_format: json_object}）。
+             *
+             * <p>OpenAI 兼容协议里这是标准能力，能让 L3 记忆抽取的 JSON 更稳；
+             * 个别厂商不支持该参数，遇到 400 就把它关掉。
+             */
+            private boolean jsonMode = true;
+
+            /**
+             * 是否允许云端模型先输出思维链再作答。
+             *
+             * <p><b>默认关闭，理由与本地模式实测一致</b>（决策 22）：本项目是"查资料给结论"，
+             * 不是数学证明。本地实测 {@code think=true} 比 {@code false} 慢 <b>16.5 倍</b>；
+             * 而 DeepSeek 当前模型是<b>默认开启思考</b>的，不显式关掉就会重演那个延迟。
+             *
+             * <p>各厂商"怎么关"的参数名不一样（DeepSeek 是 {@code thinking}，
+             * 通义系是 {@code enable_thinking}），所以<b>不写死在这里</b>，
+             * 而是由厂商预设的 {@code thinking-off-params} 描述。
+             */
+            private boolean thinking = false;
+
+            /**
+             * 额外透传到请求体的参数（原样交给厂商）。
+             *
+             * <p>给"厂商上了新参数但我们还没发版"留的口子：例如临时调
+             * {@code reasoning_effort}。与预设参数冲突时<b>以这里为准</b>
+             * （用户显式配置优先于内置预设）。
+             */
+            private Map<String, Object> customParameters = new LinkedHashMap<>();
+
+            public boolean isThinking() {
+                return thinking;
+            }
+
+            public void setThinking(boolean thinking) {
+                this.thinking = thinking;
+            }
+
+            public Map<String, Object> getCustomParameters() {
+                return customParameters;
+            }
+
+            public void setCustomParameters(Map<String, Object> customParameters) {
+                this.customParameters = customParameters;
+            }
+
+            public String getProvider() {
+                return provider;
+            }
+
+            public void setProvider(String provider) {
+                this.provider = provider;
+            }
 
             public String getBaseUrl() {
                 return baseUrl;
@@ -498,6 +609,247 @@ public class QaProperties {
 
             public void setApiKey(String apiKey) {
                 this.apiKey = apiKey;
+            }
+
+            public String getTimeout() {
+                return timeout;
+            }
+
+            public void setTimeout(String timeout) {
+                this.timeout = timeout;
+            }
+
+            public int getMaxRetries() {
+                return maxRetries;
+            }
+
+            public void setMaxRetries(int maxRetries) {
+                this.maxRetries = maxRetries;
+            }
+
+            public int getMaxOutputTokens() {
+                return maxOutputTokens;
+            }
+
+            public void setMaxOutputTokens(int maxOutputTokens) {
+                this.maxOutputTokens = maxOutputTokens;
+            }
+
+            public boolean isJsonMode() {
+                return jsonMode;
+            }
+
+            public void setJsonMode(boolean jsonMode) {
+                this.jsonMode = jsonMode;
+            }
+        }
+
+        /**
+         * 向量端点（OpenAI 兼容）。
+         */
+        public static class Embedding {
+
+            /** 厂商预设 id。 */
+            private String provider = "siliconflow";
+
+            /** base-url 覆盖值；留空用预设。 */
+            private String baseUrl;
+
+            /** 模型名覆盖值；留空用预设。 */
+            private String model;
+
+            /** Key 覆盖值；留空则按预设的 {@code api-key-env} 读环境变量。 */
+            private String apiKey;
+
+            private String timeout = "60s";
+
+            private int maxRetries = 2;
+
+            /**
+             * 向量维度。留空则按预设里该模型的维度推导。
+             *
+             * <p><b>这个值不是装饰</b>：换向量模型 = 换向量空间，维度不同时旧索引
+             * 必须重建（开发文档 4.5）。启动时用它和已有索引的维度比对，
+             * 不一致就明确报错，绝不静默降级 —— 静默的后果是"检索结果莫名其妙地烂掉"。
+             */
+            private Integer dimension;
+
+            /**
+             * 单次 embedAll 的批大小。
+             *
+             * <p>默认 16。本地 Ollama 无所谓，但云端有限流：一份 139 个片段的文档
+             * 一次性发过去会吃 429。分批 + 退避是云端入库的必需品。
+             */
+            private int batchSize = 16;
+
+            public String getProvider() {
+                return provider;
+            }
+
+            public void setProvider(String provider) {
+                this.provider = provider;
+            }
+
+            public String getBaseUrl() {
+                return baseUrl;
+            }
+
+            public void setBaseUrl(String baseUrl) {
+                this.baseUrl = baseUrl;
+            }
+
+            public String getModel() {
+                return model;
+            }
+
+            public void setModel(String model) {
+                this.model = model;
+            }
+
+            public String getApiKey() {
+                return apiKey;
+            }
+
+            public void setApiKey(String apiKey) {
+                this.apiKey = apiKey;
+            }
+
+            public String getTimeout() {
+                return timeout;
+            }
+
+            public void setTimeout(String timeout) {
+                this.timeout = timeout;
+            }
+
+            public int getMaxRetries() {
+                return maxRetries;
+            }
+
+            public void setMaxRetries(int maxRetries) {
+                this.maxRetries = maxRetries;
+            }
+
+            public Integer getDimension() {
+                return dimension;
+            }
+
+            public void setDimension(Integer dimension) {
+                this.dimension = dimension;
+            }
+
+            public int getBatchSize() {
+                return batchSize;
+            }
+
+            public void setBatchSize(int batchSize) {
+                this.batchSize = batchSize;
+            }
+        }
+
+        /**
+         * 一个厂商预设。
+         *
+         * <p>只描述"官方端点长什么样、Key 放哪个环境变量"，不掺任何业务逻辑。
+         * 模型清单是给界面下拉框与自检提示用的，实际调用以 {@code model} 字段为准 ——
+         * 厂商上新模型比我们发版快，用户可以随时在配置里覆盖。
+         */
+        public static class Preset {
+
+            /** 界面显示名。 */
+            private String label;
+
+            /** Key 所在的环境变量名，例如 {@code DEEPSEEK_API_KEY}。 */
+            private String apiKeyEnv;
+
+            /** OpenAI 兼容端点根地址。 */
+            private String baseUrl;
+
+            /** 常用对话模型名，第一个作为默认值。 */
+            private List<String> chatModels = new ArrayList<>();
+
+            /** 常用向量模型名，第一个作为默认值。 */
+            private List<String> embeddingModels = new ArrayList<>();
+
+            /** 向量模型 → 维度。用于切模型时的维度校验与界面提示。 */
+            private Map<String, Integer> embeddingDimensions = new LinkedHashMap<>();
+
+            /** 该厂商的注意事项（界面提示用），例如"无 embedding 接口"。 */
+            private String notes;
+
+            /**
+             * 关闭思考模式要发的厂商专属参数。
+             *
+             * <p>这是"厂商差异"最典型的一处：DeepSeek 用 {@code thinking: {type: disabled}}，
+             * 通义系用 {@code enable_thinking: false}，还有的用 {@code reasoning_effort: none}。
+             * 写死在代码里就意味着"每接一家新厂商都要改 Java"，所以放进预设。
+             *
+             * <p>仅当 {@code qa.cloud.chat.thinking=false} 时才会合并进请求体。
+             */
+            private Map<String, Object> thinkingOffParams = new LinkedHashMap<>();
+
+            public String getLabel() {
+                return label;
+            }
+
+            public void setLabel(String label) {
+                this.label = label;
+            }
+
+            public String getApiKeyEnv() {
+                return apiKeyEnv;
+            }
+
+            public void setApiKeyEnv(String apiKeyEnv) {
+                this.apiKeyEnv = apiKeyEnv;
+            }
+
+            public String getBaseUrl() {
+                return baseUrl;
+            }
+
+            public void setBaseUrl(String baseUrl) {
+                this.baseUrl = baseUrl;
+            }
+
+            public List<String> getChatModels() {
+                return chatModels;
+            }
+
+            public void setChatModels(List<String> chatModels) {
+                this.chatModels = chatModels;
+            }
+
+            public List<String> getEmbeddingModels() {
+                return embeddingModels;
+            }
+
+            public void setEmbeddingModels(List<String> embeddingModels) {
+                this.embeddingModels = embeddingModels;
+            }
+
+            public Map<String, Integer> getEmbeddingDimensions() {
+                return embeddingDimensions;
+            }
+
+            public void setEmbeddingDimensions(Map<String, Integer> embeddingDimensions) {
+                this.embeddingDimensions = embeddingDimensions;
+            }
+
+            public String getNotes() {
+                return notes;
+            }
+
+            public void setNotes(String notes) {
+                this.notes = notes;
+            }
+
+            public Map<String, Object> getThinkingOffParams() {
+                return thinkingOffParams;
+            }
+
+            public void setThinkingOffParams(Map<String, Object> thinkingOffParams) {
+                this.thinkingOffParams = thinkingOffParams;
             }
         }
     }

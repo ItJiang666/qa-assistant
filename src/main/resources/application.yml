@@ -50,6 +50,88 @@ qa:
 
   allowed-extensions: txt,md,docx,pdf,xlsx,html
 
+  # ===========================================================================
+  # 云端模型（P4）
+  # ===========================================================================
+  # ⚠️ 为什么这些配置放在本文件，而不是 application-cloud.yml：
+  #    profile 只占"数据源"那条轴（决策 15）；模型来源由 qa.mode + 界面上的运行时开关决定。
+  #    若把云端配置放进 cloud 专属 profile 文件，那么"用默认 h2,local 启动、再在界面上
+  #    切到云端"这条最常见的路径就读不到这些配置 —— 症状是配了模型名却被忽略。
+  #    所以：**云端配置必须放在任何 profile 都会加载的文件里**。
+  #
+  # 默认组合：对话 DeepSeek + 向量阿里百炼（两者都经官方文档逐项核对，见 presets 注释）
+  cloud:
+    chat:
+      # 厂商预设 id，见下方 presets
+      provider: deepseek
+      # 留空则取预设的第一个模型；显式填了以填的为准
+      # ⚠️ deepseek-chat / deepseek-reasoner 已于 2026-07-24 停止服务，勿再使用
+      model: deepseek-flash
+      timeout: 60s
+      # 云端比本地多一次重试：429 限流重试一下往往就好了
+      max-retries: 2
+      max-output-tokens: 1024
+      # 关思考。DeepSeek 当前模型**默认开启思考**，而本项目要的是"查资料给结论"：
+      # 本地对同一问题的实测是 think=true 慢 16.5 倍（决策 22）。
+      # "怎么关"各厂商参数名不同，由预设的 thinking-off-params 描述，不写死在代码里。
+      thinking: false
+      # 抽取模型走 response_format: json_object（协议标准能力）。
+      # 个别厂商不支持会返回 400，那时把它设为 false。
+      json-mode: true
+      # 额外透传参数（用户显式配置优先于预设），例如调 reasoning-effort：
+      # custom-parameters:
+      #   reasoning_effort: none
+    embedding:
+      provider: dashscope
+      model: text-embedding-v4
+      # ⚠️ 百炼默认 1024 维，与本地 qa-embed:4b 的 2560 维**不同** ⇒ 切换向量模型必须重建索引。
+      #    可选：2048 / 1536 / 1024 / 768 / 512 / 256 / 128 / 64。
+      #    想免重建就把 provider 换成 siliconflow（Qwen3-Embedding-4B，2560 维，与本地同源同维）。
+      dimension: 1024
+      # 云端有限流（百炼 text-embedding-v4：1800 RPM / 120 万 TPM），入库必须分批
+      batch-size: 16
+      timeout: 60s
+      max-retries: 2
+
+    # 厂商预设：只描述"官方端点长什么样、Key 放哪个环境变量、怎么关思考"。
+    # 规则：配置里填了就以填的为准，留空用预设 —— 这条规则只在 CloudEndpointResolver 实现一次。
+    # 值均来自官方文档逐项核对（2026-10-09），不凭记忆填写。
+    presets:
+      deepseek:
+        label: DeepSeek（深度求索）
+        api-key-env: DEEPSEEK_API_KEY
+        # 官方《首次调用 API》给的是 https://api.deepseek.com；官方集成页另用 /v1/chat/completions。
+        # 这里用带 /v1 的写法（OpenAI 客户端会自动补 /chat/completions）。
+        # 若遇 404，把结尾的 /v1 去掉再试 —— 这一点官方没有明确"两者等价"的表述。
+        base-url: https://api.deepseek.com/v1
+        chat-models:
+          - deepseek-flash
+          - deepseek-v4-pro
+        # 官方全站（sitemap 52 个页面）无 embeddings 端点 ⇒ 云端向量必须另配一家
+        embedding-models: []
+        thinking-off-params:
+          thinking:
+            type: disabled
+        notes: 无 embedding 接口；限流按并发连接数（flash 2500 / v4-pro 500）；402 = 余额不足（重试无用）；响应可能持续返回空行或 SSE 的 keep-alive 注释行
+
+      dashscope:
+        label: 阿里云百炼（DashScope 兼容模式）
+        api-key-env: DASHSCOPE_API_KEY
+        # 官方推荐改用业务空间专属域名：https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+        # 旧域名仍可正常使用（官方原话），且不需要填 WorkspaceId，故作为默认值。
+        base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+        chat-models:
+          - qwen3.7-plus
+          - qwen3.8-flash
+          - qwen3.8-max
+        embedding-models:
+          - text-embedding-v4
+          - text-embedding-v3
+        embedding-dimensions:
+          text-embedding-v4: 1024
+          text-embedding-v3: 1024
+        notes: API Key 与地域绑定，跨地域调用报 401（不是 Key 失效）；messages 仅第 0 条可为 system 且最后一条必须是 user；限流按主账号合并计算
+
   ingest:
     chunk-size: 500
     chunk-overlap: 50      # 建议为 chunk-size 的 10%
