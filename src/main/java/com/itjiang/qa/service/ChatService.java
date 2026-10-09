@@ -95,12 +95,19 @@ public class ChatService {
 
         String answer;
         try {
+            // 请求级检索参数（topK / minScore）。必须在调用模型前设置：检索发生在
+            // chat(...) 内部，且就在当前线程上（单查询、单检索器的同步路径），
+            // 因此 ThreadLocal 覆盖对检索可见。为 null 时表示沿用全局配置。
+            RecordingContentRetriever.applyOverrides(request.topK(), request.minScore());
             answer = assistant.chat(conversationId, composeUserMessage(question, longTermMemory));
         } catch (Exception ex) {
             // 异常路径也要清掉检索记录：ThreadLocal 会跟着复用的线程活到下一个请求，
             // 那会导致下一个问题引用到毫不相干的文档，而且随机复现
             RecordingContentRetriever.clear();
             throw translateFailure(ex, question);
+        } finally {
+            // 与 clear() 同理：覆盖参数也必须清理，否则会污染线程上的下一个请求
+            RecordingContentRetriever.clearOverrides();
         }
         // 取出本次检索命中作为"引用来源"。框架只把内容注入 Prompt，不会回传，
         // 所以这里从记录器取 —— 这正是 RecordingContentRetriever 存在的理由
@@ -163,7 +170,15 @@ public class ChatService {
         // 先推一条 meta，让前端立刻拿到 conversationId 并开始渲染，不必等第一个 token
         sendEvent(emitter, "meta", Map.of("conversationId", conversationId));
 
-        TokenStream tokenStream = assistant.chatStream(conversationId, composeUserMessage(question, longTermMemory));
+        TokenStream tokenStream;
+        try {
+            // 与同步路径同理：检索在 chatStream(...) 内部、返回流之前同步完成，
+            // 所以覆盖参数要在这里设置，拿到流之后立刻清掉
+            RecordingContentRetriever.applyOverrides(request.topK(), request.minScore());
+            tokenStream = assistant.chatStream(conversationId, composeUserMessage(question, longTermMemory));
+        } finally {
+            RecordingContentRetriever.clearOverrides();
+        }
         tokenStream
                 .onRetrieved(contents -> sourcesRef.set(toSources(contents)))
                 .onPartialResponse(token -> {

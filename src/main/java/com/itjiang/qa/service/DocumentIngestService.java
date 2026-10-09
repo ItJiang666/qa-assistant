@@ -5,6 +5,7 @@ import com.itjiang.qa.config.QaProperties;
 import com.itjiang.qa.mapper.DocumentMapper;
 import com.itjiang.qa.model.entity.Document;
 import com.itjiang.qa.model.enums.DocStatus;
+import com.itjiang.qa.rag.ChineseDocumentSplitters;
 import com.itjiang.qa.rag.SegmentMetadata;
 import dev.langchain4j.data.document.BlankDocumentException;
 import dev.langchain4j.data.document.DocumentSplitter;
@@ -173,8 +174,10 @@ public class DocumentIngestService {
         int chunkSize = properties.getIngest().getChunkSize();
         int overlap = properties.getIngest().getChunkOverlap();
 
-        // 用字符数分块。recursive 会优先按段落/句子边界切，尽量不切断语义
-        DocumentSplitter splitter = DocumentSplitters.recursive(chunkSize, overlap);
+        // 用中文友好的分块器，而不是 LangChain4j 自带的 DocumentSplitters.recursive：
+        // 后者的句子层是 OpenNLP 英文模型、词层按空格切分，对中文双双失效，
+        // 长中文段落会被退化成按字符硬切、从句子中间断开（详见 ChineseDocumentSplitters）
+        DocumentSplitter splitter = ChineseDocumentSplitters.recursive(chunkSize, overlap);
         List<TextSegment> raw = splitter.split(
                 dev.langchain4j.data.document.Document.from(text));
 

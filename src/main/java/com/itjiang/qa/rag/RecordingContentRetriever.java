@@ -2,9 +2,12 @@ package com.itjiang.qa.rag;
 
 import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.segment.TextSegment;
+import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.rag.content.Content;
 import dev.langchain4j.rag.content.retriever.ContentRetriever;
+import dev.langchain4j.rag.content.retriever.EmbeddingStoreContentRetriever;
 import dev.langchain4j.rag.query.Query;
+import dev.langchain4j.store.embedding.EmbeddingStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,10 +28,19 @@ import java.util.List;
  * <p>检索发生在框架内部，调用方拿不到它的返回值，只能靠"旁路记录"。
  * 而 Spring MVC 的每个请求独占一个线程，用 ThreadLocal 正好做到请求级隔离。
  *
+ * <h2>请求级参数覆盖</h2>
+ * <p>{@code ChatRequest} 允许每次提问单独指定 {@code topK} / {@code minScore}。
+ * 但 {@code @AiService} 引用的是<b>单例</b>检索器，框架调用它时不会把请求参数传进来。
+ * 因此同样用 ThreadLocal：{@code ChatService} 在发起调用前
+ * {@link #applyOverrides}，调用结束后 {@link #clearOverrides}，
+ * {@link #retrieve} 依据当前线程的覆盖值决定用哪个底层检索器。
+ * 不覆盖时直接复用启用了全局配置的默认实例，不产生额外对象。
+ *
  * <h2>⚠️ 必须在 finally 中清理</h2>
  * <p>Tomcat 复用线程。<b>不清理的话，下一个请求会读到上一个请求的检索结果</b> ——
  * 表现为"回答里引用了完全不相干的文档"，而且是随机复现，极难排查。
- * 因此 {@link #drain()} 是"取出并清空"的语义，{@code ChatService} 必须在 finally 中调用它。
+ * 因此 {@link #drain()} 是"取出并清空"的语义，{@code ChatService} 必须在 finally 中调用它；
+ * 覆盖参数同理，用 {@link #clearOverrides()} 清理。
  *
  * @author Jiang
  */
@@ -44,18 +56,65 @@ public class RecordingContentRetriever implements ContentRetriever {
      */
     private static final ThreadLocal<List<Content>> LAST_RETRIEVAL = new ThreadLocal<>();
 
+    /** 当前线程的检索参数覆盖（来自 ChatRequest），未设置时为 {@code null}。 */
+    private static final ThreadLocal<Overrides> OVERRIDES = new ThreadLocal<>();
+
     /** 占位内容的标记键。用于把它从引用来源里剔除。 */
     private static final String PLACEHOLDER_FLAG = "qaNoContentPlaceholder";
 
-    private final ContentRetriever delegate;
+    /** 默认检索器引用的向量库，覆盖命中时用它另建检索器。 */
+    private final EmbeddingStore<TextSegment> embeddingStore;
 
-    public RecordingContentRetriever(ContentRetriever delegate) {
-        this.delegate = delegate;
+    /** 默认检索器引用的向量模型。 */
+    private final EmbeddingModel embeddingModel;
+
+    /** 全局配置的 topK，覆盖缺省时的取值。 */
+    private final int defaultTopK;
+
+    /** 全局配置的 minScore，覆盖缺省时的取值。 */
+    private final double defaultMinScore;
+
+    /** 用全局配置构建的检索器；无覆盖时直接复用它。 */
+    private final ContentRetriever defaultRetriever;
+
+    public RecordingContentRetriever(EmbeddingStore<TextSegment> embeddingStore,
+                                     EmbeddingModel embeddingModel,
+                                     int defaultTopK,
+                                     double defaultMinScore) {
+        this.embeddingStore = embeddingStore;
+        this.embeddingModel = embeddingModel;
+        this.defaultTopK = defaultTopK;
+        this.defaultMinScore = defaultMinScore;
+        this.defaultRetriever = build(defaultTopK, defaultMinScore);
+    }
+
+    /**
+     * 为本线程设置本次请求的检索参数覆盖。
+     *
+     * <p>两个参数都可为 {@code null}，表示该维度沿用全局配置。
+     * 都为 {@code null} 时等同于 {@link #clearOverrides()}。
+     *
+     * @param topK     本次检索返回条数，可为 {@code null}
+     * @param minScore 本次检索相似度阈值，可为 {@code null}
+     */
+    public static void applyOverrides(Integer topK, Double minScore) {
+        if (topK == null && minScore == null) {
+            clearOverrides();
+            return;
+        }
+        OVERRIDES.set(new Overrides(topK, minScore));
+    }
+
+    /**
+     * 清除本线程的检索参数覆盖。请求结束（含异常路径）必须调用。
+     */
+    public static void clearOverrides() {
+        OVERRIDES.remove();
     }
 
     @Override
     public List<Content> retrieve(Query query) {
-        List<Content> contents = delegate.retrieve(query);
+        List<Content> contents = delegate().retrieve(query);
 
         // ★ 检索为空时注入一条"占位资料"，这一步是防幻觉的关键。
         //
@@ -77,6 +136,44 @@ public class RecordingContentRetriever implements ContentRetriever {
                 query.text(), contents == null ? 0 : contents.size(),
                 (contents == null || contents.isEmpty()) ? "（已注入空资料占位符）" : "");
         return effective;
+    }
+
+    /**
+     * 选定本次检索实际使用的底层检索器。
+     *
+     * <p>无覆盖、或覆盖值与全局配置完全一致时返回默认实例；否则按覆盖值临时构建。
+     *
+     * @return 底层检索器
+     */
+    private ContentRetriever delegate() {
+        Overrides overrides = OVERRIDES.get();
+        if (overrides == null) {
+            return defaultRetriever;
+        }
+        int topK = overrides.topK() != null ? overrides.topK() : defaultTopK;
+        double minScore = overrides.minScore() != null ? overrides.minScore() : defaultMinScore;
+        if (topK == defaultTopK && minScore == defaultMinScore) {
+            return defaultRetriever;
+        }
+        log.debug("本次检索使用请求级参数: topK={}, minScore={}", topK, minScore);
+        return build(topK, minScore);
+    }
+
+    /**
+     * 按给定参数构建一个向量检索器。
+     *
+     * @param topK     返回条数
+     * @param minScore 相似度阈值
+     * @return 检索器
+     */
+    private ContentRetriever build(int topK, double minScore) {
+        return EmbeddingStoreContentRetriever.builder()
+                .embeddingStore(embeddingStore)
+                .embeddingModel(embeddingModel)
+                .maxResults(topK)
+                .minScore(minScore)
+                .displayName("qa-knowledge-base")
+                .build();
     }
 
     /**
@@ -132,5 +229,14 @@ public class RecordingContentRetriever implements ContentRetriever {
      */
     public static void clear() {
         LAST_RETRIEVAL.remove();
+    }
+
+    /**
+     * 一次请求的检索参数覆盖。
+     *
+     * @param topK     返回条数，可为 {@code null} 表示沿用全局配置
+     * @param minScore 相似度阈值，可为 {@code null} 表示沿用全局配置
+     */
+    private record Overrides(Integer topK, Double minScore) {
     }
 }

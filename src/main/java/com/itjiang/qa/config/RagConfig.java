@@ -4,7 +4,6 @@ import com.itjiang.qa.rag.RecordingContentRetriever;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.rag.content.retriever.ContentRetriever;
-import dev.langchain4j.rag.content.retriever.EmbeddingStoreContentRetriever;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import dev.langchain4j.store.embedding.inmemory.InMemoryEmbeddingStore;
 import org.slf4j.Logger;
@@ -64,14 +63,9 @@ public class RagConfig {
         double minScore = properties.getRetrieval().getMinScore();
         log.info("检索器就绪: topK={}, minScore={}（低于阈值的结果不会交给模型）", topK, minScore);
 
-        ContentRetriever delegate = EmbeddingStoreContentRetriever.builder()
-                .embeddingStore(store)
-                .embeddingModel(model)
-                .maxResults(topK)
-                .minScore(minScore)
-                .displayName("qa-knowledge-base")
-                .build();
-        return new RecordingContentRetriever(delegate);
+        // 把向量库与向量模型直接交给装饰器：请求级覆盖（ChatRequest.topK/minScore）
+        // 需要按新参数临时另建检索器，因此它必须自己持有这两个依赖
+        return new RecordingContentRetriever(store, model, topK, minScore);
     }
 
     /**

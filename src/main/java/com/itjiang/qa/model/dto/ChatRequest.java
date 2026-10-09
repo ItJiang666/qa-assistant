@@ -1,5 +1,9 @@
 package com.itjiang.qa.model.dto;
 
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 
@@ -28,8 +32,12 @@ public record ChatRequest(
 
         String conversationId,
 
+        @Min(value = 1, message = "topK 至少为 1")
+        @Max(value = 20, message = "topK 最大为 20")
         Integer topK,
 
+        @DecimalMin(value = "0.0", message = "minScore 不能小于 0")
+        @DecimalMax(value = "1.0", message = "minScore 不能大于 1")
         Double minScore,
 
         Boolean remember
