@@ -20,6 +20,25 @@ server:
 spring:
   application:
     name: qa-assistant
+
+  # ===========================================================================
+  # 读取项目根目录的 .env（P4 新增）
+  # ===========================================================================
+  # 用法：把 .env.example 复制为 .env，填上 API Key。
+  #
+  # 三处细节，少一个都会踩坑：
+  #   1. `optional:` —— .env 不存在时**不报错**。只用本地 Ollama 的人根本不需要这个文件。
+  #   2. `[.properties]` —— 告诉 Spring 按 properties 格式解析（KEY=VALUE，# 开头是注释）。
+  #      不写这个后缀，Spring 会因为文件没有扩展名而猜不出格式。
+  #   3. 路径是**相对工作目录**的：IDEA 默认是项目根；`java -jar` 则是你在哪个目录启动
+  #      就以哪个目录为根。换目录启动要记得把 .env 一起带过去。
+  #
+  # ⚠️ 优先级：.env 里的值**高于** application.yml 里的默认值。
+  #    所以哪天 .env 里留了个过期的 Key，它会静默生效 —— 排查"配置明明改了却没变"时，
+  #    第一个该看的就是这里。
+  config:
+    import: optional:file:./.env[.properties]
+
   profiles:
     active: ${QA_PROFILES:h2,local}
   lifecycle:
