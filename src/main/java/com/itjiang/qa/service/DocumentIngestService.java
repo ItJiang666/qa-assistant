@@ -6,6 +6,7 @@ import com.itjiang.qa.mapper.DocumentMapper;
 import com.itjiang.qa.model.entity.Document;
 import com.itjiang.qa.model.enums.DocStatus;
 import com.itjiang.qa.rag.SegmentMetadata;
+import dev.langchain4j.data.document.BlankDocumentException;
 import dev.langchain4j.data.document.DocumentSplitter;
 import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.document.parser.apache.tika.ApacheTikaDocumentParser;
@@ -137,6 +138,21 @@ public class DocumentIngestService {
             log.info("入库完成: id={}, file={}, 分块 {}，耗时 {} ms",
                     documentId, doc.getFileName(), segments.size(),
                     System.currentTimeMillis() - startMillis);
+
+        } catch (BlankDocumentException ex) {
+            // ★ 扫描版 PDF / 纯图片文档走的是这条路径，而不是上面的空值检查。
+            //
+            //   原因：FileSystemDocumentLoader.loadDocument(...) 对"解析不出任何文字"的文档
+            //   是【抛异常】而不是返回一个 text 为空的 Document。所以 if (text.isBlank())
+            //   那段代码对最重要的失败场景根本不会执行 —— 实测扫描件上传后，
+            //   用户看到的是 "BlankDocumentException: The document is blank" 这种
+            //   技术黑话，完全不知道该怎么办。
+            //
+            //   这正是开发文档第 9 章「何时拆分 Python」决策树的第一个判断点，
+            //   必须给出人能看懂的结论。
+            markFailed(documentId, "解析结果为空。该文件可能是扫描版 PDF 或纯图片，"
+                    + "没有可提取的文字层（需要 OCR，本期不支持）");
+            log.warn("文档无文字层（疑似扫描件）: id={}, file={}", documentId, doc.getFileName());
 
         } catch (Exception ex) {
             // 兜底：任何未预期异常都要落成 FAILED，否则记录会永远卡在 PARSING，
