@@ -1,0 +1,7 @@
+# pnpm 11 起，构建脚本白名单不再从 package.json 的 "pnpm" 字段读取，改放在这里。
+#
+# 为什么必须显式放行：pnpm 默认拦截依赖的安装期脚本（供应链安全考虑），
+# 而 esbuild 需要执行安装脚本确认平台二进制。不放行的话 `pnpm install`
+# 会以 ERR_PNPM_IGNORED_BUILDS 退出，连 `pnpm build` 都会因前置依赖检查而失败。
+allowBuilds:
+  esbuild: true

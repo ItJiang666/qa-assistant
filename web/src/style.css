@@ -1,0 +1,31 @@
+/* 全局基础样式。刻意保持极少：组件样式交给 Element Plus 与各页面自己管 */
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: "Microsoft YaHei", "PingFang SC", -apple-system, "Segoe UI", sans-serif;
+    background: #f6f7f9;
+    color: #1f2329;
+    font-size: 14px;
+}
+
+/* 对话气泡里的换行要保留，同时避免长串英文把布局撑破 */
+.preserve-whitespace {
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* 引用来源里的定宽展示 */
+.mono {
+    font-family: Consolas, "Courier New", monospace;
+}
