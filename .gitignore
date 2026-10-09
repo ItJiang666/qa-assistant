@@ -1,0 +1,51 @@
+### ── 构建产物 ─────────────────────────────────────────────
+target/
+build/
+out/
+!.mvn/wrapper/maven-wrapper.jar
+
+### ── 运行时数据（决策 19：默认落在用户目录，此处兜底防误放）──
+data/
+uploads/
+index/
+*.mv.db
+*.trace.db
+*.lock.db
+
+### ── 密钥与环境变量（绝不提交真实 Key，见开发文档 12.4 红线）──
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.p12
+*.jks
+
+### ── IDE ─────────────────────────────────────────────────
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+nbproject/
+
+### ── 前端 ────────────────────────────────────────────────
+node_modules/
+dist/
+web/node_modules/
+web/dist/
+.pnpm-store/
+
+### ── 日志与临时文件 ───────────────────────────────────────
+*.log
+logs/
+*.tmp
+*.bak
+
+### ── 操作系统 ─────────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+.DS_Store

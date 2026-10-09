@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>qa-assistant · 智能问答助手</title>
+    <style>
+        :root { --bg:#f6f7f9; --card:#fff; --line:#e3e6eb; --text:#1f2329; --muted:#8a9099; --accent:#2e5496; }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; padding: 40px 16px; background: var(--bg); color: var(--text);
+            font-family: "Microsoft YaHei", "PingFang SC", -apple-system, Segoe UI, sans-serif;
+        }
+        .wrap { max-width: 760px; margin: 0 auto; }
+        h1 { font-size: 22px; margin: 0 0 6px; }
+        .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+        .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px; margin-bottom: 16px; }
+        .card h2 { font-size: 14px; margin: 0 0 14px; color: var(--accent); font-weight: 600; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        td { padding: 7px 0; border-bottom: 1px solid #f0f2f5; vertical-align: top; }
+        tr:last-child td { border-bottom: none; }
+        td.k { color: var(--muted); width: 42%; }
+        td.v { font-family: Consolas, monospace; word-break: break-all; }
+        .ok { color: #1a7f37; font-weight: 600; }
+        .err { color: #c0392b; font-weight: 600; }
+        .tag { display:inline-block; padding:1px 8px; border-radius:10px; background:#eef3fb; color:var(--accent); font-size:12px; }
+        code { background:#f2f4f7; padding:1px 6px; border-radius:4px; font-family:Consolas,monospace; }
+        .note { font-size:12px; color:var(--muted); line-height:1.9; }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <h1>qa-assistant <span class="tag">P0 骨架</span></h1>
+    <div class="sub">可离线运行的知识库智能问答助手 · 当前页面为阶段占位页，用来确认后端与数据层已经跑通</div>
+
+    <div class="card">
+        <h2>后端状态（实时调用 /api/v1/system/status）</h2>
+        <div id="status"><span class="note">加载中……</span></div>
+    </div>
+
+    <div class="card">
+        <h2>接下来会有什么</h2>
+        <div class="note">
+            P1 会话记忆落库 → P2 文档上传与向量入库 → P3 检索问答（带引用来源）→ P3.5 长期记忆 → P5 正式前端。<br>
+            完整设计与进度见仓库根目录的 <code>docs/开发文档.md</code>。
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>数据放在哪</h2>
+        <div class="note">
+            所有运行时数据都在用户目录下，不在项目里 —— 所以要备份或迁移，复制那一个目录即可：<br>
+            <code>%USERPROFILE%\.qa-assistant\</code> → <code>data</code>(H2) / <code>uploads</code>(原件) / <code>index</code>(向量) / <code>logs</code>(日志)
+        </div>
+    </div>
+</div>
+
+<script>
+    // 生成并复用匿名用户标识（决策 19）：长期记忆需要一个归属人，这里不做登录。
+    // 换浏览器 = 换人；清掉 localStorage 相当于重置这个身份的记忆。
+    function currentUserId() {
+        let id = localStorage.getItem('qa_user_id');
+        if (!id) {
+            id = (crypto.randomUUID ? crypto.randomUUID()
+                : 'u-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10));
+            localStorage.setItem('qa_user_id', id);
+        }
+        return id;
+    }
+
+    const LABELS = {
+        runMode: '运行模式', chatModel: '对话模型', embeddingModel: '向量模型', numCtx: '上下文窗口',
+        dataDir: '数据目录', database: '数据库', vectorStore: '向量库',
+        documentCount: '文档数', chunkCount: '分块数', memoryCount: '长期记忆条数',
+        userIdentified: '已识别用户', userId: '用户标识'
+    };
+
+    async function refresh() {
+        const box = document.getElementById('status');
+        try {
+            const resp = await fetch('/api/v1/system/status', { headers: { 'X-User-Id': currentUserId() } });
+            const body = await resp.json();
+            if (body.code !== 0) {
+                box.innerHTML = '<span class="err">接口返回错误：</span>' + body.message;
+                return;
+            }
+            const rows = Object.keys(LABELS)
+                .filter(k => body.data[k] !== undefined && body.data[k] !== null)
+                .map(k => `<tr><td class="k">${LABELS[k]}</td><td class="v">${body.data[k]}</td></tr>`)
+                .join('');
+            box.innerHTML = '<table>' + rows + '</table>'
+                + '<div class="note" style="margin-top:12px"><span class="ok">✓ 后端正常</span>'
+                + ' —— 能看到数据目录与数据库类型，说明 H2 与建表脚本均已生效。</div>';
+        } catch (e) {
+            box.innerHTML = '<span class="err">无法连接后端：</span>' + e;
+        }
+    }
+
+    refresh();
+</script>
+</body>
+</html>

@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  qa-assistant 日志配置
+
+  设计取舍：
+    1. 控制台用彩色短格式（开发时看得清），文件用带时间戳的完整格式（排查时够用）
+    2. 日志文件落在数据目录下，与 H2 库、向量索引同处一地 ——
+       用户要打包反馈问题时，把 .qa-assistant 整个目录给出来就够了
+    3. 按天 + 按大小双滚动，保留 30 天，单文件上限 50MB，避免日志吃满磁盘
+    4. 单独分离 ERROR 文件：出问题时先看 error.log，不必在大文件里翻找
+-->
+<configuration>
+
+    <!-- 从 Spring 配置读取数据目录，避免在多处硬编码路径 -->
+    <springProperty scope="context" name="DATA_DIR" source="qa.data-dir"
+                    defaultValue="${user.home}/.qa-assistant"/>
+    <property name="LOG_DIR" value="${DATA_DIR}/logs"/>
+
+    <property name="CONSOLE_PATTERN"
+              value="%d{HH:mm:ss.SSS} %highlight(%-5level) %cyan(%-40.40logger{39}) : %msg%n"/>
+    <property name="FILE_PATTERN"
+              value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n"/>
+
+    <!-- ── 控制台 ──────────────────────────────────────────────── -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${CONSOLE_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- ── 全量日志文件 ────────────────────────────────────────── -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_DIR}/qa-assistant.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_DIR}/qa-assistant.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>50MB</maxFileSize>
+            <maxHistory>30</maxHistory>
+            <totalSizeCap>1GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>${FILE_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- ── 仅 ERROR 的日志文件 ─────────────────────────────────── -->
+    <appender name="ERROR_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_DIR}/qa-assistant-error.log</file>
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>ERROR</level>
+        </filter>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_DIR}/qa-assistant-error.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>20MB</maxFileSize>
+            <maxHistory>30</maxHistory>
+            <totalSizeCap>300MB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>${FILE_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- 应用自身日志：DEBUG 只在开发 profile 下打开 -->
+    <springProfile name="dev">
+        <logger name="com.itjiang.qa" level="DEBUG"/>
+    </springProfile>
+    <logger name="com.itjiang.qa" level="INFO"/>
+
+    <!-- 第三方框架噪音压制：这些 INFO 对定位业务问题没有帮助 -->
+    <logger name="org.apache.pdfbox" level="WARN"/>
+    <logger name="org.apache.tika" level="WARN"/>
+    <logger name="org.apache.fontbox" level="WARN"/>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+        <appender-ref ref="ERROR_FILE"/>
+    </root>
+</configuration>

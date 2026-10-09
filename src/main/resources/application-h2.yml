@@ -1,0 +1,26 @@
+# =============================================================================
+# 数据源 profile：h2（默认，零安装）
+# =============================================================================
+# ⚠️ 这里**故意不写** spring.datasource.url ——
+#    H2 的 JDBC URL 不接受 Windows 反斜杠路径，${user.home} 在 Windows 上会解析成
+#    C:\Users\Jiang，直接拼进 URL 会混用两种分隔符。因此数据源由
+#    com.itjiang.qa.config.H2DataSourceConfig 构建，统一把路径归一化为正斜杠，
+#    并在构建前创建好 data / uploads / index 三个目录。
+# =============================================================================
+
+spring:
+  sql:
+    init:
+      # always 而非 embedded：我们要显式控制建表时机，不依赖自动推断
+      mode: always
+      schema-locations: classpath:sql/schema-h2.sql
+      # 建表脚本必须幂等（脚本内已用 IF NOT EXISTS / CREATE INDEX IF NOT EXISTS），
+      # 因此这里不必容错；一旦脚本报错就应当启动失败，而不是带着不完整的表继续跑
+      continue-on-error: false
+  h2:
+    console:
+      # 开发期方便直接看数据；对外部署时必须关闭
+      enabled: true
+      path: /h2-console
+      settings:
+        web-allow-others: false

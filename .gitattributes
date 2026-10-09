@@ -1,0 +1,26 @@
+# 统一换行符，避免 Windows / Linux / macOS 协作时整个文件被标记为"已修改"
+# 详见 https://git-scm.com/docs/gitattributes
+
+# 默认：仓库内一律 LF，检出时由 git 按平台转换
+* text=auto eol=lf
+
+# Windows 批处理必须是 CRLF，否则 cmd.exe 可能解析异常
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 二进制文件不做任何转换
+*.jar   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.docx  binary
+*.xlsx  binary
+*.mv.db binary
+*.ico   binary
+
+# 语言统计时不计入第三方产物
+pnpm-lock.yaml  linguist-generated
+package-lock.json linguist-generated

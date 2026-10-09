@@ -1,0 +1,26 @@
+# =============================================================================
+# 数据源 profile：mysql（可选）
+# =============================================================================
+# 启用方式：set QA_PROFILES=mysql,local
+#
+# ⚠️ 用 MariaDB 驱动连接 MySQL，而不是 MySQL Connector/J（开发文档 12.4）：
+#    MySQL Connector/J 是 GPLv2 + FOSS 例外，与本项目 Apache-2.0 的授权链存在歧义；
+#    MariaDB Connector/J 是 LGPL，协议干净，且与 MySQL 8 完全兼容。
+# =============================================================================
+
+spring:
+  datasource:
+    url: jdbc:mariadb://localhost:3306/qa_assistant?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&createDatabaseIfNotExist=true
+    driver-class-name: org.mariadb.jdbc.Driver
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:}
+    hikari:
+      pool-name: qa-mysql-pool
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 10000
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:sql/schema-mysql.sql
+      continue-on-error: false
