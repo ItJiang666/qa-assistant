@@ -299,6 +299,20 @@ public class QaProperties {
          */
         private String numCtx = "auto";
 
+        /**
+         * 单次回答的最大生成长度（token），对应 Ollama 的 {@code num_predict}。
+         *
+         * <p>默认 1024，两个用途：
+         * <ol>
+         *   <li><b>延迟兜底</b>：本地实测生成速度约 60 token/s，不设上限时模型偶尔会长篇大论，
+         *       单次回答轻松超过 10 秒。1024 token 约合 700 汉字，与开发文档 4.6.6
+         *       的"回答预算 ≈1000 token"一致。</li>
+         *   <li><b>防止跑飞</b>：极端情况下模型可能进入复读，有硬上限才能保证请求最终结束。</li>
+         * </ol>
+         * 填 0 或负数表示不限制（回到模型默认）。
+         */
+        private int maxOutputTokens = 1024;
+
         /** 模型调用超时（ISO-8601 时长格式）。 */
         private String timeout = "120s";
 
@@ -362,6 +376,14 @@ public class QaProperties {
 
         public void setNumCtx(String numCtx) {
             this.numCtx = numCtx;
+        }
+
+        public int getMaxOutputTokens() {
+            return maxOutputTokens;
+        }
+
+        public void setMaxOutputTokens(int maxOutputTokens) {
+            this.maxOutputTokens = maxOutputTokens;
         }
 
         public String getTimeout() {

@@ -23,6 +23,9 @@ import java.time.Duration;
  *       表现为"模型明明有资料却说找不到"。这是最隐蔽的一类故障。</li>
  *   <li><b>{@code temperature=0.3}</b> —— 知识库问答要的是忠于原文，不是发挥创意。
  *       温度偏高会明显增加编造数字和流程的概率。</li>
+ *   <li><b>{@code numPredict}</b> —— 单次回答的 token 上限（配置项
+ *       {@code qa.local.max-output-tokens}）。本地生成速度约 60 token/s，
+ *       不设上限时长篇回答会把单次请求拖到十几秒。</li>
  * </ul>
  *
  * @author Jiang
@@ -43,8 +46,8 @@ public class LocalModelProvider implements ModelProvider {
     public ChatModel chatModel() {
         QaProperties.Local cfg = properties.getLocal();
         int numCtx = numCtxResolver.resolve();
-        log.info("装配本地对话模型: {} @ {} (numCtx={}, think={})",
-                cfg.getChatModel(), cfg.getBaseUrl(), numCtx, cfg.isThink());
+        log.info("装配本地对话模型: {} @ {} (numCtx={}, think={}, maxOutputTokens={})",
+                cfg.getChatModel(), cfg.getBaseUrl(), numCtx, cfg.isThink(), describeOutputLimit(cfg));
 
         OllamaChatModel.OllamaChatModelBuilder builder = OllamaChatModel.builder()
                 .baseUrl(cfg.getBaseUrl())
@@ -56,9 +59,13 @@ public class LocalModelProvider implements ModelProvider {
                 .maxRetries(1)
                 .logRequests(cfg.isLogRequests())
                 .logResponses(cfg.isLogResponses());
-        // think(...) 的声明返回类型是基类 OllamaBaseChatModel.Builder，
-        // 会打断链式调用的类型推断，因此必须单独一行调用，不能再挂回链上
+        // think(...) 与 numPredict(...) 都继承自基类 OllamaBaseChatModel.Builder
+        // （那个类是包级可见的，本包外写不出它的类型），返回类型会把链式调用的
+        // 类型推断带偏，因此这两类设置一律单独一行调用，不能再挂回链上。
         builder.think(cfg.isThink());
+        if (cfg.getMaxOutputTokens() > 0) {
+            builder.numPredict(cfg.getMaxOutputTokens());
+        }
         return builder.build();
     }
 
@@ -66,7 +73,8 @@ public class LocalModelProvider implements ModelProvider {
     public ChatModel extractChatModel() {
         QaProperties.Local cfg = properties.getLocal();
         int numCtx = numCtxResolver.resolve();
-        log.info("装配本地抽取模型: {} (temperature=0, think={})", cfg.getChatModel(), cfg.isThink());
+        log.info("装配本地抽取模型: {} (temperature=0, think={}, maxOutputTokens={})",
+                cfg.getChatModel(), cfg.isThink(), describeOutputLimit(cfg));
 
         OllamaChatModel.OllamaChatModelBuilder builder = OllamaChatModel.builder()
                 .baseUrl(cfg.getBaseUrl())
@@ -77,6 +85,9 @@ public class LocalModelProvider implements ModelProvider {
                 .timeout(parseTimeout(cfg.getTimeout()))
                 .maxRetries(1);
         builder.think(cfg.isThink());
+        if (cfg.getMaxOutputTokens() > 0) {
+            builder.numPredict(cfg.getMaxOutputTokens());
+        }
         return builder.build();
     }
 
@@ -84,7 +95,8 @@ public class LocalModelProvider implements ModelProvider {
     public StreamingChatModel streamingChatModel() {
         QaProperties.Local cfg = properties.getLocal();
         int numCtx = numCtxResolver.resolve();
-        log.info("装配本地流式模型: {} (numCtx={}, think={})", cfg.getChatModel(), numCtx, cfg.isThink());
+        log.info("装配本地流式模型: {} (numCtx={}, think={}, maxOutputTokens={})",
+                cfg.getChatModel(), numCtx, cfg.isThink(), describeOutputLimit(cfg));
 
         OllamaStreamingChatModel.OllamaStreamingChatModelBuilder builder = OllamaStreamingChatModel.builder()
                 .baseUrl(cfg.getBaseUrl())
@@ -93,7 +105,20 @@ public class LocalModelProvider implements ModelProvider {
                 .numCtx(numCtx)
                 .timeout(parseTimeout(cfg.getTimeout()));
         builder.think(cfg.isThink());
+        if (cfg.getMaxOutputTokens() > 0) {
+            builder.numPredict(cfg.getMaxOutputTokens());
+        }
         return builder.build();
+    }
+
+    /**
+     * 生成日志里用的长度上限描述。
+     *
+     * @param cfg 本地模型配置
+     * @return 形如 {@code 1024} 或 {@code 不限制}
+     */
+    private String describeOutputLimit(QaProperties.Local cfg) {
+        return cfg.getMaxOutputTokens() > 0 ? String.valueOf(cfg.getMaxOutputTokens()) : "不限制";
     }
 
     @Override

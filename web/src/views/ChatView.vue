@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, chatStream, type Conversation, type Source } from '../api/client'
 
@@ -80,6 +80,34 @@ async function scrollToBottom() {
   }
 }
 
+/**
+ * 流式增量专用：节流滚动。
+ *
+ * 模型每秒会产出几十个 delta，如果每个 delta 都 nextTick + 写 scrollTop，
+ * 浏览器每帧都要重排一次，长回答下会明显掉帧。这里限制最多 80ms 滚一次，
+ * 视觉上依旧跟手，重排次数降到十分之一左右。
+ */
+const SCROLL_THROTTLE_MS = 80
+let scrollTimer: ReturnType<typeof setTimeout> | null = null
+
+function scrollToBottomThrottled() {
+  if (scrollTimer !== null) {
+    return
+  }
+  scrollTimer = setTimeout(() => {
+    scrollTimer = null
+    void scrollToBottom()
+  }, SCROLL_THROTTLE_MS)
+}
+
+// 组件卸载后定时器仍可能触发，届时 listRef 已失效；清掉避免操作已销毁的 DOM
+onBeforeUnmount(() => {
+  if (scrollTimer !== null) {
+    clearTimeout(scrollTimer)
+    scrollTimer = null
+  }
+})
+
 async function send() {
   const text = question.value.trim()
   if (!text || sending.value) {
@@ -89,8 +117,11 @@ async function send() {
   sending.value = true
 
   bubbles.value.push({ role: 'user', content: text })
-  const answer: Bubble = { role: 'assistant', content: '', streaming: true }
-  bubbles.value.push(answer)
+  bubbles.value.push({ role: 'assistant', content: '', streaming: true })
+  // 关键：必须回读数组里的元素（Vue 的响应式代理）再改它。
+  // 若攥着 push 进去的那个原始对象改，set 不会触发依赖通知，
+  // 界面就只在最后被别的事件顺带刷新一次 —— 表现为"没有流式输出"。
+  const answer = bubbles.value[bubbles.value.length - 1]
   await scrollToBottom()
 
   try {
@@ -100,7 +131,7 @@ async function send() {
       },
       onDelta: chunk => {
         answer.content += chunk
-        void scrollToBottom()
+        scrollToBottomThrottled()
       },
       onDone: payload => {
         answer.streaming = false
