@@ -41,8 +41,10 @@ import java.util.regex.Pattern;
  *       绝不能假设"stdout 全是 JSON"。只在哨兵之间取内容。</li>
  *   <li><b>进程树强杀</b>：超时后只 {@code destroy()} 主进程，Python 拉起的子进程会成为
  *       孤儿继续吃 CPU。必须先杀 descendants 再杀主进程。</li>
- *   <li><b>可用性探测只做一次</b>：{@code --check} 要 fork 一个 Python，成本不低；
- *       结果是进程级不变的，缓存起来，避免每次点按钮都探测一遍。</li>
+ *   <li><b>可用性探测短期缓存</b>：{@code --check} 要 fork 一个 Python，成本约 0.4 秒，
+ *       所以结果缓存 5 秒用于合并同一次页面加载的多个请求。
+ *       <b>但不能永久缓存</b> —— 那会让"装完依赖刷新页面"看不到任何变化，
+ *       用户只能靠重启应用才能生效，而这件事他无从得知。</li>
  * </ol>
  *
  * @author Jiang
@@ -67,26 +69,56 @@ public class RapidOcrEngine implements OcrEngine {
     private final QaProperties properties;
     private final ObjectMapper objectMapper;
 
-    /** 可用性缓存：进程级不变，只探一次。 */
-    private volatile Availability cachedAvailability;
-
     /** 探测出的 Python 可执行文件；未探测时为 {@code null}。 */
     private volatile String resolvedPython;
+
+    /** 最近一次探测结果；配合 {@link #AVAILABILITY_TTL} 判断是否还有效。 */
+    private volatile Availability cachedAvailability;
+
+    /**
+     * 可用性缓存的有效期。
+     *
+     * <p>缓存<b>不再永久有效</b>（原实现是"进程级只探一次"）。原因是那会让用户困惑：
+     * 他按提示装好依赖、刷新页面，界面却依旧显示"缺少依赖" —— 因为他必须先重启应用。
+     * 而"装完依赖要重启才能生效"这件事，对用户来说毫无道理，也不会有人去猜。
+     *
+     * <p>代价可控：一次探测 = fork 一个 Python 跑 {@code --check}（不加载模型），
+     * 实测约 0.4 秒。而探测只发生在用户打开「文档管理」页时，不在问答链路上。
+     * 用 0.4 秒换掉"必须重启"这个反直觉约束，划算。
+     */
+    private static final Duration AVAILABILITY_TTL = Duration.ofSeconds(5);
+
+    /** 上次探测的时刻；配合 {@link #AVAILABILITY_TTL} 决定是否重探。 */
+    private volatile long probedAtMillis;
 
     public RapidOcrEngine(QaProperties properties, ObjectMapper objectMapper) {
         this.properties = properties;
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * 探测 OCR 可用性。
+     *
+     * <p>结果缓存 {@link #AVAILABILITY_TTL}，过期后重探 —— 所以用户装完依赖
+     * 刷新页面就能看到状态变化，不需要重启应用。
+     *
+     * <p>短 TTL 而不是完全不缓存：一次页面加载可能触发多个请求（列表 + 状态），
+     * 5 秒窗口足以把它们合并成一次探测，又不影响"装完刷新即生效"。
+     *
+     * @return 可用性
+     */
     @Override
     public Availability availability() {
+        long now = System.currentTimeMillis();
         Availability cached = cachedAvailability;
-        if (cached != null) {
+        if (cached != null && now - probedAtMillis < AVAILABILITY_TTL.toMillis()) {
             return cached;
         }
         synchronized (this) {
-            if (cachedAvailability == null) {
+            now = System.currentTimeMillis();
+            if (cachedAvailability == null || now - probedAtMillis >= AVAILABILITY_TTL.toMillis()) {
                 cachedAvailability = probeAvailability();
+                probedAtMillis = now;
             }
             return cachedAvailability;
         }
@@ -401,7 +433,13 @@ public class RapidOcrEngine implements OcrEngine {
             case DISABLED -> "本地 OCR 已被配置关闭（qa.ocr.enabled=false）。";
             case NO_PYTHON -> "本机未找到 Python，扫描件识别需要 Python 3.10+。"
                     + "不装也能正常使用其余功能，只是扫描件无法入库。";
-            case NO_DEPENDENCY -> "本机缺少 OCR 依赖。请执行：pip install -r deploy/ocr/requirements.txt";
+            // 这条文案要能直接照抄执行，所以写清三件事：缺哪些包、在哪执行、装完干什么。
+            // 之前只写了一句 `pip install -r deploy/ocr/requirements.txt` —— 相对路径，
+            // 用户在任意目录下执行都会失败，而这是界面给出的唯一指引。
+            case NO_DEPENDENCY -> "本机缺少 OCR 依赖（需要 rapidocr + onnxruntime + pymupdf 三个包）。"
+                    + "先在程序目录下执行：python -m pip install -r deploy\\ocr\\requirements.txt"
+                    + "（这一步需要联网）；装完刷新本页即可，看到绿色提示就说明成功了。"
+                    + "注意 onnxruntime 要单独装 —— rapidocr 不会自动带上它。";
             case NO_SCRIPT -> "找不到 OCR 脚本 deploy/ocr/qa_ocr.py。"
                     + "请从项目根目录启动应用（脚本按工作目录解析）。";
             case READY -> "OCR 可用";

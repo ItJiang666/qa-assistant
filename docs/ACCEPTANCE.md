@@ -128,17 +128,40 @@ Linux / macOS：
 > ⚠️ 先分清两件事：**解析失败**和**装没装 OCR 依赖无关** —— 扫描件没有文字层，
 > 上传后必然显示"失败"，装了依赖也一样。依赖只决定失败之后能不能救回来。
 
+### 8.1 先在干净 venv 里验依赖清单（**这一步不能跳**）
+
+> 为什么要单独建 venv：开发机上往往早就装过 `onnxruntime`（折腾 PaddleOCR 之类留下的），
+> 于是"依赖清单漏了它"这种 bug **在开发机上永远暴露不出来**。
+> 必须用一个全新的 Python 环境，才能验出清单本身对不对。
+
+```cmd
+cd /d D:\qa-assistant
+python -m venv %TEMP%\qa-ocr-test
+%TEMP%\qa-ocr-test\Scripts\python.exe -m pip install -r deploy\ocr\requirements.txt
+%TEMP%\qa-ocr-test\Scripts\python.exe deploy\ocr\qa_ocr.py --check
+```
+
+- [ ] 最后一条命令输出 `{"ok": true, ...}`（**这是硬门槛**）
+- [ ] 输出里 `versions` 含**三个**键：`rapidocr` / `pymupdf` / `onnxruntime`
+      —— 少任何一个都说明 `requirements.txt` 漏了包
+- [ ] 全部装完后 `%TEMP%\qa-ocr-test` 可以直接删掉（它只用来验清单）
+
+### 8.2 用真实环境走一遍界面流程
+
 - [ ] 传一份扫描件或手机拍的 PDF —— 状态"失败"，原因里写明可用「识别文字」
 - [ ] 按 README 第 8 节的**四步**装 OCR 依赖（关键是先 `cd /d` 到程序目录，
       再用 `python -m pip install -r deploy\ocr\requirements.txt`）
       —— 这一步要联网；脚本随发布包分发，就在 `deploy/ocr/`
-- [ ] 装完跑一次自检：`python -c "import rapidocr, pymupdf; print('OK')"`
+- [ ] 装完跑自检（**三个包都要查**）：
+      `python -c "import sys, rapidocr, onnxruntime, pymupdf; print('OK'); print(sys.executable)"`
 - [ ] **刷新页面**（F5），那条失败记录的「识别文字」按钮变成可点
+      （探测缓存 5 秒，刷新即生效，**不需要重启应用**）
 - [ ] 点它，等识别完（约 2.5 秒/页），弹出确认对话框
 - [ ] 对话框里有：页数、字数、平均置信度、识别文本预览
 - [ ] 点「确认入库」，状态变"已入库"，失败原因列显示"正文来自本机 OCR 识别…"
 - [ ] 去对话页问一个只有那份扫描件里才有的内容 —— 能检索到
-- [ ] **不装 Python 的情况**：按钮应置灰并给出安装命令，其余功能完全不受影响
+- [ ] **不装 Python 的情况**：按钮应置灰，提示里给出**能在程序目录直接照抄**的安装命令，
+      其余功能完全不受影响
 
 ## 9. 文件格式与不支持场景
 

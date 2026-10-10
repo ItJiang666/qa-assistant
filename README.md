@@ -95,7 +95,7 @@ java -jar qa-assistant-1.0.0-SNAPSHOT.jar
 | JDK | **17 或更高** | **始终需要**。已在 17 与 25 上各跑过一次验收 |
 | Ollama | 任意近期版本 | **仅本地模式**。走云端模式可以不装 |
 | Python | 3.10 或更高 | **仅"扫描版 PDF 识别文字"这一项可选功能**。不装不影响问答、上传、检索 |
-| Python 依赖 | `python -m pip install -r deploy\ocr\requirements.txt`（**必须先 `cd /d` 到程序目录**，见下方四步） | 同上（约 35 MB，含模型，**装完即离线可用**；装的时候需要联网） |
+| Python 依赖 | `python -m pip install -r deploy\ocr\requirements.txt`（**必须先 `cd /d` 到程序目录**，见下方四步） | 同上（约 50 MB，含模型，**装完即离线可用**；装的时候需要联网）<br>会装三个包：`rapidocr` + `onnxruntime` + `pymupdf` |
 | 显卡 | 建议独显 ≥ 8 GB 显存 | **仅本地模式**。无独显可用：`num-ctx` 自动降级，或直接走云端模式 |
 | 云端 API Key | 见 `.env.example` | **仅云端模式**。本地模式零配置即可启动 |
 
@@ -180,13 +180,21 @@ python -m pip install -r deploy\ocr\requirements.txt
 
 用 `python -m pip` 而不是直接敲 `pip` —— 前者不依赖 PATH 配置，更不容易出问题。
 
-**第 4 步：自检。** 没报错、打印出下面这行就成功了：
+**第 4 步：自检。** 没报错、打印出下面两行就成功了：
 
 ```cmd
-python -c "import rapidocr, pymupdf; print('OCR 依赖就绪')"
+python -c "import sys, rapidocr, onnxruntime, pymupdf; print('OCR 依赖就绪'); print(sys.executable)"
 ```
 
-最后回到网页**刷新一下**（F5）—— 界面要重新探测一次才会把按钮点亮。
+⚠️ **这三个包一个都不能少**（`rapidocr`、`onnxruntime`、`pymupdf`），因为应用就是按这个标准判定的。
+尤其 **`onnxruntime` 必须单独装** —— `rapidocr` 的依赖清单里没有它，少查一个就会**误报通过**。
+这个坑本项目真踩过：干净机器装完依赖、自检说"就绪"，应用却一直显示"缺少 OCR 依赖"。
+
+第二行打印的是**实际生效的 Python 路径**。如果它和你装依赖时用的不是同一个，
+应用就会一直说"缺少依赖" —— 把这行输出留下来，排查时最有用。
+
+最后回到网页**刷新一下**（F5）即可 —— 界面每次进入「文档管理」页都会重新探测，
+**不需要重启应用**。
 
 ### 装完之后怎么用
 

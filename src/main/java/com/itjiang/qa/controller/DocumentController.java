@@ -119,8 +119,14 @@ public class DocumentController {
             case DISABLED -> "本地 OCR 已在配置中关闭（qa.ocr.enabled=false）。扫描件无法识别文字。";
             case NO_PYTHON -> "未检测到 Python。扫描件识别需要本机安装 Python 3.10+；"
                     + "不装也不影响其它功能，只是扫描件无法入库。";
-            case NO_DEPENDENCY -> "缺少 OCR 依赖，在本机执行一次即可：\n"
-                    + "pip install -r deploy/ocr/requirements.txt";
+            // 这条 hint 是界面上「本机未启用扫描件文字识别」提示条的正文，
+            // 也是用户唯一的操作指引 —— 所以必须能直接照抄：
+            // 命令写全（含 cd）、点明三个包（onnxruntime 尤其容易漏）、说明装完怎么办。
+            case NO_DEPENDENCY -> "缺少 OCR 依赖。请在本机执行下面两条命令（需要联网）：\n"
+                    + "cd /d <你解压出来的程序目录>\n"
+                    + "python -m pip install -r deploy\\ocr\\requirements.txt\n"
+                    + "会装上 rapidocr、onnxruntime、pymupdf 三个包，缺一不可"
+                    + "（onnxruntime 不会随 rapidocr 自动安装）。装完刷新本页即可，无需重启。";
             case NO_SCRIPT -> "找不到 deploy/ocr/qa_ocr.py。请从项目根目录启动应用"
                     + "（脚本按当前工作目录解析）。";
         };

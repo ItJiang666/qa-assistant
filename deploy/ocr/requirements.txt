@@ -3,17 +3,31 @@
 # 只有"扫描版 PDF 识别"这一项功能需要它们。不装的话，上传扫描件会得到
 # 一句明确提示（需要 OCR，本期不支持），其余功能完全不受影响。
 #
-# 安装：
-#     pip install -r deploy/ocr/requirements.txt
+# 安装（**必须先 cd 到程序目录**，这条命令用的是相对路径）：
+#     cd /d D:\qa-assistant
+#     python -m pip install -r deploy\ocr\requirements.txt
 #
-# 为什么是这两个：
-#   rapidocr    ONNX Runtime + PP-OCR 模型，**模型随 pip 包下发**（约 31 MB），
-#               不联网下载；纯 CPU 即可跑，中文识别质量优于 Tesseract。
-#               不用 PaddleOCR 原版：Paddle 3.x 在本项目实测会抛
-#               `NotImplementedError: ConvertPirAttribute2RuntimeAttribute not support`，
-#               版本适配上更容易出问题。
-#   pymupdf     把 PDF 逐页渲染成位图（纯本地，无外部命令依赖；不用 poppler/Ghostscript）
+# 为什么是这三个：
+#   rapidocr      PP-OCR 系列的推理封装，**模型随 pip 包下发**（约 31 MB），
+#                 不联网下载；纯 CPU 即可跑，中文识别质量优于 Tesseract。
+#                 不用 PaddleOCR 原版：Paddle 3.x 在本项目实测会抛
+#                 `NotImplementedError: ConvertPirAttribute2RuntimeAttribute not support`，
+#                 版本适配上更容易出问题。
+#   onnxruntime   rapidocr 的**推理后端**。⚠️ 必须显式声明 ——
+#                 rapidocr 3.x 的依赖清单里**没有它**（只有 pyclipper / opencv /
+#                 numpy / Shapely / Pillow / PyYAML / tqdm / omegaconf / requests
+#                 / colorlog / six），所以不写这一行，装完 rapidocr 也跑不起来。
+#                 **这是本项目踩过的真实故障**：干净机器按 README 装完依赖，
+#                 自检却通过（旧自检只 import rapidocr 和 pymupdf，恰好漏掉它），
+#                 而应用的可用性判定要求三个包都能 import，于是界面一直显示
+#                 "本机缺少 OCR 依赖"。开发机没暴露这个问题，只因为那台机器上
+#                 早先折腾 PaddleOCR 时已经装过 onnxruntime。
+#   pymupdf       把 PDF 逐页渲染成位图（纯本地，无外部命令依赖；不用 poppler/Ghostscript）
 #
 # 版本要求：Python 3.10+（已在 3.13.13 上实测通过）
+#
+# 装完自检（三个包都要在，与应用的真实判定标准一致）：
+#     python -c "import sys, rapidocr, onnxruntime, pymupdf; print('OCR 依赖就绪'); print(sys.executable)"
 rapidocr>=3.0
+onnxruntime>=1.17
 pymupdf>=1.24
