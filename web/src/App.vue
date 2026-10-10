@@ -282,7 +282,7 @@ onBeforeUnmount(() => {
       </div>
     </el-alert>
 
-    <el-container>
+    <el-container class="app-body">
       <el-aside width="200px" class="app-aside">
         <el-menu :default-active="activeTab" @select="(k: string) => (activeTab = k as Tab)">
           <el-menu-item index="documents">文档管理</el-menu-item>
@@ -537,12 +537,35 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
+/*
+ * 侧栏 + 主区这一层必须也被约束住，否则上面那句"锁死外壳"是假的。
+ *
+ * 实测踩到的坑（无头 Edge，视口 808px，往对话页塞 24 条气泡后）：
+ *   .app-shell 高 808（被 overflow:hidden 锁住，看着没问题）
+ *   .app-main  高 1339 ← 破了
+ *   .view-host 高 1251
+ *   .composer  top 1299 / bottom 1376 ← 输入框跑到视口下方 568px，整个看不见
+ * 原因是这一层 el-container 默认 min-height:auto，被内容撑多高就多高，
+ * flex 只负责"分空间"、拦不住内容溢出。它一破，里面所有 flex 与 min-height:0
+ * 全部失去意义 —— 那时消息区高度等于内容高度，overflow-y:auto 永远不触发，
+ * 于是既滚不动消息、也够不到输入框。
+ *
+ * flex:1 + min-height:0 把它钉回"页头之外的那点高度"，下面各层的约束才开始生效。
+ */
+.app-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .app-main {
   padding: 18px;
   overflow: hidden;
   /* 让 .view-host 用 flex:1 拿到"页头与提示条之外的全部高度" */
   display: flex;
   flex-direction: column;
+  /* 主区是这一行里的 flex 子项，同样必须归零，否则它也会被内容撑破 */
+  min-height: 0;
 }
 
 /*
