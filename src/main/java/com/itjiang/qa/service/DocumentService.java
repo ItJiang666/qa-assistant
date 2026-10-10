@@ -22,6 +22,7 @@ import java.nio.file.StandardCopyOption;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -255,16 +256,25 @@ public class DocumentService {
     /**
      * 校验扩展名白名单。
      *
+     * <p><b>为什么用 LinkedHashSet 而不是 HashSet</b>：这条报错要把支持格式念给用户听，
+     * 而 HashSet 的迭代顺序是按哈希排的。实测同一份配置在界面上显示成
+     * {@code txt / xlsx / pdf / md / html / docx} —— 既不是配置顺序也不是字母序，
+     * 用户第一眼很容易读成"不支持 docx、pdf"。LinkedHashSet 保持配置里的书写顺序，
+     * 念出来才像人话。
+     *
+     * <p>措辞也改过：原来是「允许: A / B / C」，斜杠分隔的一长串很难看出
+     * 哪个是"不支持的"哪个是"支持的"。现在把不支持的单独放前面，支持的后置且用顿号。
+     *
      * @param extension 小写扩展名
      */
     private void validateExtension(String extension) {
         Set<String> allowed = Arrays.stream(properties.getAllowedExtensions().split(","))
                 .map(s -> s.trim().toLowerCase(Locale.ROOT))
                 .filter(s -> !s.isEmpty())
-                .collect(Collectors.toSet());
+                .collect(Collectors.toCollection(LinkedHashSet::new));
         if (!allowed.contains(extension)) {
             throw new BusinessException(ErrorCode.DOC_TYPE_NOT_ALLOWED,
-                    "不支持的文件类型 ." + extension + "，允许: " + String.join(" / ", allowed));
+                    "不支持 ." + extension + " 格式；本系统支持：" + String.join("、", allowed));
         }
     }
 

@@ -36,8 +36,21 @@ public class QaProperties {
      */
     private String dataDir;
 
-    /** 允许上传的扩展名，逗号分隔。 */
-    private String allowedExtensions = "txt,md,docx,pdf,xlsx,html";
+    /**
+     * 允许上传的扩展名，逗号分隔。
+     *
+     * <p>{@code doc} 是 Word 97-2003 的老式二进制格式，由 Tika 背后的
+     * Apache POI HWPF 模块解析（{@code poi-scratchpad}，Tika 依赖里已经带了）。
+     * 实测一份 25 KB 的真实 .doc 简历：解析出 4 个分块、正文无乱码、可被检索命中。
+     *
+     * <p>保留它的现实理由：政企、学校场景里存量 .doc 远多于 .docx。
+     * 但老式二进制的解析健壮性不如 OOXML —— 复杂表格、嵌入对象、域代码
+     * 可能解析不全。所以文档里统一建议"优先用 .docx"。
+     *
+     * <p><b>顺序有意义</b>：报错话术会按这个顺序原样展示给用户，
+     * 别改成 Set 或重排。
+     */
+    private String allowedExtensions = "txt,md,docx,doc,pdf,xlsx,html";
 
     private Ingest ingest = new Ingest();
     private Retrieval retrieval = new Retrieval();

@@ -199,7 +199,9 @@ public class MetaQuestionService {
             out.append("资料只来自你在「文档管理」页上传的文档，当前已入库 ")
                     .append(describeDocuments(documents)).append("。\n");
         } else if ("capability".equals(kind)) {
-            out.append("支持 txt / md / docx / pdf / xlsx / html（扫描版 PDF 无文字层，本期不支持）；")
+            out.append("支持 txt / md / docx / doc / pdf / xlsx / html；")
+                    .append("扫描版 PDF 无文字层，上传后可在「文档管理」页点「识别文字」用本机 OCR 处理，")
+                    .append("识别结果需你确认才入库；")
                     .append("可切换本地与云端两种模型来源。\n");
         } else if ("smoke".equals(kind)) {
             out.append("链路正常。当前对话模型 ").append(model)

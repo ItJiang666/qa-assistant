@@ -256,7 +256,7 @@ onBeforeUnmount(() => {
         <div class="card-header">
           <span>上传文档</span>
           <span class="hint">
-            支持 txt / md / docx / pdf / xlsx / html，单文件不超过 50MB
+            支持 txt / md / docx / doc / pdf / xlsx / html，单文件不超过 50MB
           </span>
         </div>
       </template>
@@ -266,7 +266,7 @@ onBeforeUnmount(() => {
           multiple
           :show-file-list="false"
           :http-request="handleUpload"
-          accept=".txt,.md,.docx,.pdf,.xlsx,.html">
+          accept=".txt,.md,.docx,.doc,.pdf,.xlsx,.html">
         <div class="drop-zone">
           <div class="drop-title">把文件拖到这里，或点击选择</div>
           <div class="drop-sub">
