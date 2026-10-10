@@ -49,10 +49,15 @@ else
 fi
 
 # ---------- 2) 找到可执行的 jar ----------
+# 兼容两种布局：开发仓库（jar 在 target/）与发布包（jar 就在本目录）
 JAR="$(ls -1 target/qa-assistant-*.jar 2>/dev/null | head -n 1)"
 if [ -z "$JAR" ]; then
-  echo "[X] 在 target/ 下没有找到 qa-assistant-*.jar。"
-  echo "    请先构建：mvn clean package"
+  JAR="$(ls -1 qa-assistant-*.jar 2>/dev/null | head -n 1)"
+fi
+if [ -z "$JAR" ]; then
+  echo "[X] 没有找到 qa-assistant-*.jar。"
+  echo "    下载的发布包：说明包不完整，请重新下载并核对 SHA256。"
+  echo "    从源码运行：请先构建 mvn clean package"
   echo "    （改了前端的话要先 cd web && pnpm build，再 mvn clean package）"
   exit 1
 fi
@@ -102,6 +107,10 @@ if [ "$OLLAMA_OK" = "1" ]; then
   echo "    并生成项目专用的向量模型（把上下文压到 2048，否则它会独占约 10GB 显存）："
   echo "      ollama create qa-embed:4b -f deploy/ollama/Modelfile.qa-embed"
   echo "    漏掉最后一步的表现是「每一问都要等 7~10 秒」。"
+  echo
+  echo "[i] 要处理扫描版 PDF（可选），还需要 Python 3.10+ 和一条命令："
+  echo "      pip install -r deploy/ocr/requirements.txt"
+  echo "    不装不影响问答、上传、检索。"
 fi
 
 echo

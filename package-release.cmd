@@ -48,8 +48,8 @@ set "STAGE=release\stage"
 if exist "release" rmdir /s /q "release"
 mkdir "!STAGE!" >nul 2>nul
 mkdir "!STAGE!\deploy\ollama" >nul 2>nul
+mkdir "!STAGE!\deploy\ocr" >nul 2>nul
 mkdir "!STAGE!\docs" >nul 2>nul
-mkdir "!STAGE!\tools" >nul 2>nul
 
 copy /y "!JAR!" "!STAGE!\!JAR_NAME!" >nul
 copy /y "start.cmd" "!STAGE!\" >nul
@@ -59,8 +59,9 @@ copy /y "LICENSE" "!STAGE!\" >nul
 copy /y "README.md" "!STAGE!\" >nul
 copy /y "docs\DESIGN.md" "!STAGE!\docs\" >nul
 copy /y "docs\ACCEPTANCE.md" "!STAGE!\docs\" >nul
-copy /y "tools\build-design-doc.cjs" "!STAGE!\tools\" >nul
 copy /y "deploy\ollama\Modelfile.qa-embed" "!STAGE!\deploy\ollama\" >nul
+copy /y "deploy\ocr\qa_ocr.py" "!STAGE!\deploy\ocr\" >nul
+copy /y "deploy\ocr\requirements.txt" "!STAGE!\deploy\ocr\" >nul
 
 rem 防止误发：.env 绝不能进包（哪怕它存在于工作目录）
 if exist "!STAGE!\.env" del /q "!STAGE!\.env"

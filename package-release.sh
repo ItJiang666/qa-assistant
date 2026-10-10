@@ -45,7 +45,7 @@ echo "[OK] 已确认程序包内含前端页面"
 # ---------- 3) 准备临时目录 ----------
 STAGE="release/stage"
 rm -rf release
-mkdir -p "$STAGE/deploy/ollama" "$STAGE/docs" "$STAGE/tools"
+mkdir -p "$STAGE/deploy/ollama" "$STAGE/deploy/ocr" "$STAGE/docs"
 
 cp "$JAR"            "$STAGE/$JAR_NAME"
 cp start.sh          "$STAGE/"
@@ -56,7 +56,8 @@ cp README.md         "$STAGE/"
 cp docs/DESIGN.md    "$STAGE/docs/"
 cp docs/ACCEPTANCE.md "$STAGE/docs/"
 cp deploy/ollama/Modelfile.qa-embed "$STAGE/deploy/ollama/"
-cp tools/build-design-doc.cjs      "$STAGE/tools/"
+cp deploy/ocr/qa_ocr.py            "$STAGE/deploy/ocr/"
+cp deploy/ocr/requirements.txt     "$STAGE/deploy/ocr/"
 
 chmod +x "$STAGE/start.sh"
 
