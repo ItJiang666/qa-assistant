@@ -185,6 +185,108 @@ qa:
           enable_thinking: false
         notes: 官方未标注部分 embedding 模型的默认维度，务必显式配 dimension；Qwen3 系列支持 dimensions 参数；另有 thinking_budget / reasoning_effort / min_p 等扩展参数
 
+      # ── 以下 7 家为 v1.11 P4 收尾补齐：事实取自官方文档核对（2026-10-10），非凭记忆 ──
+      # 每条都标注了 **能否作向量源** —— 这是最容易配错的点：
+      # 方舟的 embedding 明确不支持 OpenAI 协议，Kimi/MiniMax/阶跃根本没有 embedding 接口。
+
+      zhipu:
+        label: 智谱 BigModel（GLM）
+        api-key-env: ZHIPU_API_KEY
+        # ⚠️ 不是 /v1：智谱用的是 /api/paas/v4（写错必 404）
+        base-url: https://open.bigmodel.cn/api/paas/v4
+        chat-models:
+          - glm-5.3
+          - glm-5.3-flash
+          - glm-5.2
+        embedding-models:
+          - embedding-3
+          - embedding-2
+        embedding-dimensions:
+          embedding-3: 2048
+          embedding-2: 1024
+        # embedding-3 单次最多 64 条
+        embedding-max-batch: 64
+        thinking-off-params:
+          thinking:
+            type: disabled
+        notes: 可作向量源。base-url 不是 /v1；temperature 区间是 (0,1)，官方明确"不建议取值为 0"——抽取模型（温度 0）在这里可能不生效，必要时用 custom-parameters 覆盖；embedding-3 可用 dimensions 指定 256/512/1024/2048
+
+      kimi:
+        label: 月之暗面 Kimi（Moonshot）
+        api-key-env: MOONSHOT_API_KEY
+        base-url: https://api.moonshot.cn/v1
+        chat-models:
+          - kimi-k3
+          - kimi-k2.7-code
+          - kimi-k2.6
+        # ⚠️ 只能当对话源：官方端点一览里没有 /v1/embeddings
+        embedding-models: []
+        notes: 不能作向量源（无 embedding 接口）。moonshot-v1-* 全系列已于 2026-08-31 下线、kimi-k2 系列已于 2026-05-25 下线，勿再用；max_tokens 已弃用改为 max_completion_tokens（本客户端仍发 max_tokens，若报错请用 custom-parameters 调整）
+
+      ark:
+        label: 火山方舟（豆包）
+        api-key-env: ARK_API_KEY
+        base-url: https://ark.cn-beijing.volces.com/api/v3
+        chat-models:
+          - doubao-seed-2-1-pro-260915
+          - doubao-seed-2-1-lite-260915
+        # ⚠️ 官方原文："向量化能力：模型不支持 OpenAI API，请使用方舟 SDK"
+        embedding-models: []
+        thinking-off-params:
+          thinking:
+            type: disabled
+        notes: 不能作向量源（embedding 不走 OpenAI 协议，必须用方舟 SDK 打 /api/v3/embeddings/multimodal）。用 API Key 鉴权时 model 填 Model ID 即可，**不强制**接入点 ID（只有 AK/SK 鉴权或多应用隔离场景才用 ep-xxx）
+
+      hunyuan:
+        label: 腾讯混元
+        api-key-env: HUNYUAN_API_KEY
+        base-url: https://api.hunyuan.cloud.tencent.com/v1
+        chat-models:
+          - hunyuan-turbos-latest
+          - hunyuan-lite
+        embedding-models:
+          - hunyuan-embedding
+        embedding-dimensions:
+          hunyuan-embedding: 1024
+        notes: 可作向量源，但限制最多：embedding 只接受 input 与 model 两个参数、维度固定 1024（**不要传 dimensions**，否则可能 400）；stop 语义与 OpenAI **相反**（混元停在匹配内容之后）；官方公告将迁移至 TokenHub，长期可用性待观察
+
+      minimax:
+        label: MiniMax
+        api-key-env: MINIMAX_API_KEY
+        base-url: https://api.minimax.cn/v1
+        chat-models:
+          - MiniMax-M3
+          - MiniMax-M2.7
+        embedding-models: []
+        notes: 不能作向量源（无 embedding 接口）。差异较多：presence_penalty / frequency_penalty / logit_bias 会被忽略；n 只能为 1；temperature 超出 [0,2] 直接报错；响应体含 base_resp / input_sensitive 等自有字段
+
+      stepfun:
+        label: 阶跃星辰 StepFun
+        api-key-env: STEP_API_KEY
+        base-url: https://api.stepfun.com/v1
+        chat-models:
+          - step-5-preview
+          - step-3.7-flash
+        embedding-models: []
+        notes: 不能作向量源（无 embedding 接口）。默认 temperature=0.5 / top_p=0.9；同时返回 reasoning 与 reasoning_content
+
+      qianfan:
+        label: 百度千帆 v2
+        api-key-env: QIANFAN_API_KEY
+        base-url: https://qianfan.baidubce.com/v2
+        chat-models:
+          - ernie-5.1
+          - ernie-4.5-turbo-128k
+        embedding-models:
+          - qwen3-embedding-4b
+          - bge-large-zh
+          - tao-8k
+        embedding-dimensions:
+          qwen3-embedding-4b: 2560
+          bge-large-zh: 1024
+          tao-8k: 1024
+        notes: 可作向量源。鉴权是 **Bearer（bce-v3/ALTAK-...）而不是 AK/SK 签名**（AK/SK 属旧版、官方 SDK 已标注过时）；embedding 维度由模型固定、**不支持 dimensions 参数**；响应含千帆自有字段
+
   ingest:
     chunk-size: 500
     chunk-overlap: 50      # 建议为 chunk-size 的 10%

@@ -72,6 +72,34 @@ set SILICONFLOW_API_KEY=sk-xxx     # 向量
 - **回答必须有依据**：只使用检索到的原文，资料里没有就明确说"未找到"，禁止编造
 - **引用来源**：每条回答标注来自哪个文档的哪一段，可核对
 - **文档格式**：txt / md / docx / pdf / xlsx / html
+- **本地与云端可运行时切换**：页面上点一下即切换（对话模型立即生效；向量模型需重启并重建索引）
+- **多家厂商开箱可用**：云端以 OpenAI 兼容协议为准，换厂商 = 改一行 `provider` + 填对应 Key
+
+---
+
+## 支持的模型厂商
+
+本地模式用 Ollama；云端模式内置 **10 家**预设。换厂商只需改 `qa.cloud.chat.provider` /
+`qa.cloud.embedding.provider`，再把对应 Key 填进 `.env`。
+
+| 厂商 | provider | 对话 | 向量 | 注意事项 |
+|---|---|---|---|---|
+| DeepSeek（深度求索） | `deepseek` | ✅ | ❌ | 无 embedding 接口；`deepseek-chat` / `deepseek-reasoner` 已停用，现役 `deepseek-flash` |
+| 阿里云百炼 | `dashscope` | ✅ | ✅ 1024 维 | Key 与地域绑定，跨地域报 401；单次最多 10 条 |
+| 硅基流动 | `siliconflow` | ✅ | ✅ 2560 维 | 官方未标注默认维度，必须显式配 `dimension` |
+| 智谱 BigModel（GLM） | `zhipu` | ✅ | ✅ 2048 维 | base-url 是 `/api/paas/v4`，**不是** `/v1` |
+| 月之暗面 Kimi | `kimi` | ✅ | ❌ | 无 embedding；`moonshot-v1-*` 已下线 |
+| 火山方舟（豆包） | `ark` | ✅ | ❌ | embedding **不走 OpenAI 协议**，必须用方舟 SDK |
+| 腾讯混元 | `hunyuan` | ✅ | ✅ 固定 1024 | 不要传 `dimensions`；`stop` 语义与 OpenAI 相反 |
+| MiniMax | `minimax` | ✅ | ❌ | 部分 OpenAI 参数被忽略；`n` 只能为 1 |
+| 阶跃星辰 StepFun | `stepfun` | ✅ | ❌ | 无 embedding |
+| 百度千帆 v2 | `qianfan` | ✅ | ✅ 维度固定 | 鉴权是 Bearer，**不是** AK/SK 签名 |
+
+> ⚠️ **四家不能作向量源**（DeepSeek / Kimi / 方舟 / MiniMax / 阶跃）：它们的向量接口要么不存在、
+> 要么不走 OpenAI 协议。配成向量源必然失败 —— 界面上会直接标红，别绕过去。
+>
+> 完整清单（各家可用模型名、向量维度、注意事项）在界面上：
+> **系统状态 → 内置厂商**，并且能看到 Key 配没配（只显示"已配置/未配置"，不回显内容）。
 
 ---
 

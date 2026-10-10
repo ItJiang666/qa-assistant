@@ -91,6 +91,10 @@ export interface SystemStatus {
   /** 向量模型所属模式（只读，换它需重启并重建索引）。 */
   embeddingRunMode: string
   cloudProvider: string | null
+  /** 当前对话厂商的预设 id（用于在厂商表里高亮"当前"）。 */
+  cloudChatProviderId: string | null
+  /** 当前向量厂商的预设 id。 */
+  cloudEmbeddingProviderId: string | null
   cloudChatModel: string | null
   cloudEmbeddingModel: string | null
   /** 云端对话端点是否可用（Key 与模型名齐备）。 */
@@ -99,6 +103,28 @@ export interface SystemStatus {
   cloudBlockedReason: string | null
   /** 索引与当前向量模型不一致的提示；一致时为 null。 */
   indexWarning: string | null
+  /** 当前生效的检索与分块参数。 */
+  retrieval: {
+    topK: number
+    minScore: number
+    queryExpansion: boolean
+    extraQueries: number
+    chunkSize: number
+    chunkOverlap: number
+  }
+}
+
+/** 内置厂商预设（只读展示用；Key 只有"配没配"的布尔，绝不回显内容）。 */
+export interface CloudPreset {
+  id: string
+  label: string
+  baseUrl: string
+  chatModels: string[]
+  embeddingModels: string[]
+  embeddingDimensions: Record<string, number>
+  notes: string | null
+  apiKeyEnv: string | null
+  apiKeyConfigured: boolean
 }
 
 /** 连通性自检的单项结果。 */
@@ -195,6 +221,9 @@ export const api = {
   /** 云端连通性自检：不消耗生成额度，用于区分"Key 不对"与"网络不通"。 */
   cloudCheck: () => request<{ items: CloudCheckItem[] }>(
       '/api/v1/system/cloud-check', { method: 'POST' }),
+
+  /** 内置厂商预设清单（只读）：用于在界面上看清"有哪些厂商、Key 配没配、能不能当向量源"。 */
+  cloudPresets: () => request<CloudPreset[]>('/api/v1/system/cloud-presets'),
 
   listDocuments: (page = 1, size = 50) =>
       request<{ total: number; items: DocumentItem[] }>(`/api/v1/documents?page=${page}&size=${size}`),

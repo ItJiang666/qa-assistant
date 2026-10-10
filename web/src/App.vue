@@ -5,17 +5,19 @@ import { api, getUserId, resetUserId, type CloudCheckItem, type SystemStatus } f
 import DocumentsView from './views/DocumentsView.vue'
 import ChatView from './views/ChatView.vue'
 import MemoryView from './views/MemoryView.vue'
+import SystemView from './views/SystemView.vue'
 
 /**
  * 应用外壳。
  *
- * 只有三个页面（文档 / 对话 / 记忆），用状态切换而不是 vue-router ——
+ * 四个页面（文档 / 对话 / 记忆 / 系统状态），用状态切换而不是 vue-router ——
  * 少一层依赖、少一份路由配置；将来需要「分享链接直达某页」时再引入也不迟。
- * 这不是偷懒，是针对三页内部工具的有意取舍。
+ * 这不是偷懒，是针对内部工具的有意取舍。
  *
  * P4 追加：模型来源开关（本地 ⇄ 云端）。
+ * P6 追加：系统状态页 —— 把散在页头、弹窗、yml、启动日志里的状态收敛到一处。
  */
-type Tab = 'documents' | 'chat' | 'memories'
+type Tab = 'documents' | 'chat' | 'memories' | 'system'
 
 const activeTab = ref<Tab>('documents')
 const status = ref<SystemStatus | null>(null)
@@ -168,6 +170,7 @@ onMounted(loadStatus)
           <el-menu-item index="documents">文档管理</el-menu-item>
           <el-menu-item index="chat">对话问答</el-menu-item>
           <el-menu-item index="memories">记忆管理</el-menu-item>
+          <el-menu-item index="system">系统状态</el-menu-item>
         </el-menu>
 
         <div v-if="status" class="footer-note">
@@ -197,7 +200,8 @@ onMounted(loadStatus)
 
         <DocumentsView v-if="activeTab === 'documents'" @changed="loadStatus" />
         <ChatView v-else-if="activeTab === 'chat'" @changed="loadStatus" />
-        <MemoryView v-else @changed="loadStatus" />
+        <MemoryView v-else-if="activeTab === 'memories'" @changed="loadStatus" />
+        <SystemView v-else />
       </el-main>
     </el-container>
 

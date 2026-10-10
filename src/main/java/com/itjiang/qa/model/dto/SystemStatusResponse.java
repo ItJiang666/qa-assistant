@@ -37,6 +37,8 @@ package com.itjiang.qa.model.dto;
  * @param modeOverridden     当前模式是否与配置不同（即被运行时改过）
  * @param embeddingRunMode   向量模型所属模式（只读；换它必须重启并重建索引）
  * @param cloudProvider      云端厂商显示名（当前对话厂商；未配置时为 {@code null}）
+ * @param cloudChatProviderId 当前对话厂商的预设 id（界面据此高亮"当前选中"）
+ * @param cloudEmbeddingProviderId 当前向量厂商的预设 id
  * @param cloudChatModel     云端对话模型名（用于界面提示"切过去会用哪个模型"）
  * @param cloudEmbeddingModel 云端向量模型名与维度描述
  * @param cloudReady         云端对话端点是否可用（base-url + 模型 + Key 齐备）
@@ -61,10 +63,36 @@ public record SystemStatusResponse(
         boolean modeOverridden,
         String embeddingRunMode,
         String cloudProvider,
+        String cloudChatProviderId,
+        String cloudEmbeddingProviderId,
         String cloudChatModel,
         String cloudEmbeddingModel,
         boolean cloudReady,
         String cloudBlockedReason,
-        String indexWarning
+        String indexWarning,
+        RetrievalSettings retrieval
 ) {
+
+    /**
+     * 当前生效的检索参数（供"系统状态"页展示）。
+     *
+     * <p><b>为什么把它放进状态接口：</b>用户问"为什么只给我 8 条资料"、
+     * "为什么改了配置没生效"时，需要一个能一眼看到<b>实际生效值</b>的地方 ——
+     * 只看 yml 是不够的，那里可能有环境变量覆盖、也可能有跑起来后才定下来的值。
+     *
+     * @param topK              检索条数（实测拐点 8，见开发文档 9.2）
+     * @param minScore          相似度阈值
+     * @param queryExpansion    查询改写是否开启（实测在该知识库上零增益，默认关）
+     * @param extraQueries      改写额外生成几条
+     * @param chunkSize         入库分块大小（字）
+     * @param chunkOverlap      分块重叠（字）
+     */
+    public record RetrievalSettings(
+            int topK,
+            double minScore,
+            boolean queryExpansion,
+            int extraQueries,
+            int chunkSize,
+            int chunkOverlap) {
+    }
 }

@@ -86,11 +86,20 @@ public class SystemStatusService {
                 modeService.overridden(),
                 modelRegistry.embeddingMode().value(),
                 chatEndpoint.label() == null ? chatEndpoint.providerId() : chatEndpoint.label(),
+                chatEndpoint.providerId(),
+                embeddingEndpoint.providerId(),
                 chatEndpoint.model(),
                 describeEmbedding(embeddingEndpoint),
                 chatEndpoint.usable(),
                 chatEndpoint.usable() ? null : chatEndpoint.missingHint() + "（补到 .env 或环境变量后重启应用）",
-                indexWarning());
+                indexWarning(),
+                new SystemStatusResponse.RetrievalSettings(
+                        properties.getRetrieval().getTopK(),
+                        properties.getRetrieval().getMinScore(),
+                        properties.getRetrieval().getQueryExpansion().isEnabled(),
+                        properties.getRetrieval().getQueryExpansion().getExtraQueries(),
+                        properties.getIngest().getChunkSize(),
+                        properties.getIngest().getChunkOverlap()));
     }
 
     /**

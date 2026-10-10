@@ -4,6 +4,7 @@ import com.itjiang.qa.common.ApiResponse;
 import com.itjiang.qa.model.dto.ChatModeRequest;
 import com.itjiang.qa.model.dto.CloudCheckResponse;
 import com.itjiang.qa.model.dto.SystemStatusResponse;
+import com.itjiang.qa.provider.CloudEndpointResolver;
 import com.itjiang.qa.service.CloudConnectivityService;
 import com.itjiang.qa.service.RuntimeModeService;
 import com.itjiang.qa.service.SystemStatusService;
@@ -13,6 +14,8 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 /**
  * 系统状态与模型来源接口（F9）。
@@ -29,13 +32,16 @@ public class SystemController {
     private final SystemStatusService systemStatusService;
     private final RuntimeModeService runtimeModeService;
     private final CloudConnectivityService connectivityService;
+    private final CloudEndpointResolver cloudEndpointResolver;
 
     public SystemController(SystemStatusService systemStatusService,
                             RuntimeModeService runtimeModeService,
-                            CloudConnectivityService connectivityService) {
+                            CloudConnectivityService connectivityService,
+                            CloudEndpointResolver cloudEndpointResolver) {
         this.systemStatusService = systemStatusService;
         this.runtimeModeService = runtimeModeService;
         this.connectivityService = connectivityService;
+        this.cloudEndpointResolver = cloudEndpointResolver;
     }
 
     /**
@@ -80,5 +86,22 @@ public class SystemController {
     @PostMapping("/cloud-check")
     public ApiResponse<CloudCheckResponse> cloudCheck() {
         return ApiResponse.ok(connectivityService.checkAll());
+    }
+
+    /**
+     * 内置厂商预设清单（只读，供界面展示）。
+     *
+     * <p><b>为什么值得单独开一个接口：</b>国内厂商的差异不止 base-url 与模型名，
+     * 还有"哪家能当向量源"这种一配错就必然失败的坑（方舟的 embedding 不走 OpenAI 协议，
+     * Kimi / MiniMax / 阶跃根本没有 embedding 接口）。把这些连同"Key 配没配"一起摆在界面上，
+     * 用户就不必翻文档，也不会配出一个注定 404 的组合。
+     *
+     * <p>⚠️ 每个预置只回 Key 的**布尔状态**，绝不回显内容。
+     *
+     * @return 预设清单
+     */
+    @GetMapping("/cloud-presets")
+    public ApiResponse<List<CloudEndpointResolver.PresetView>> cloudPresets() {
+        return ApiResponse.ok(cloudEndpointResolver.presetViews());
     }
 }
