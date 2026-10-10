@@ -1,5 +1,6 @@
 package com.itjiang.qa.service;
 
+import com.itjiang.qa.config.NumCtxResolver;
 import com.itjiang.qa.config.QaProperties;
 import com.itjiang.qa.context.UserContext;
 import com.itjiang.qa.mapper.DocumentMapper;
@@ -41,6 +42,7 @@ public class SystemStatusService {
     private final CloudEndpointResolver cloudResolver;
     private final ThinkingModeService thinkingMode;
     private final CloudConnectivityService connectivityService;
+    private final NumCtxResolver numCtxResolver;
 
     public SystemStatusService(QaProperties properties,
                                DocumentMapper documentMapper,
@@ -50,7 +52,8 @@ public class SystemStatusService {
                                RuntimeModeService modeService,
                                CloudEndpointResolver cloudResolver,
                                ThinkingModeService thinkingMode,
-                               CloudConnectivityService connectivityService) {
+                               CloudConnectivityService connectivityService,
+                               NumCtxResolver numCtxResolver) {
         this.properties = properties;
         this.documentMapper = documentMapper;
         this.jdbcTemplate = jdbcTemplate;
@@ -60,6 +63,7 @@ public class SystemStatusService {
         this.cloudResolver = cloudResolver;
         this.thinkingMode = thinkingMode;
         this.connectivityService = connectivityService;
+        this.numCtxResolver = numCtxResolver;
     }
 
     /**
@@ -80,7 +84,7 @@ public class SystemStatusService {
                 modelRegistry.chatMode().value(),
                 modelRegistry.chatModelName(),
                 modelRegistry.embeddingModelName(),
-                properties.getLocal().getNumCtx(),
+                describeNumCtx(),
                 properties.dataPath().toAbsolutePath().normalize().toString(),
                 detectDatabase(),
                 "InMemoryEmbeddingStore",
@@ -115,6 +119,29 @@ public class SystemStatusService {
                         properties.getRetrieval().getQueryExpansion().getExtraQueries(),
                         properties.getIngest().getChunkSize(),
                         properties.getIngest().getChunkOverlap()));
+    }
+
+    /**
+     * 把本地上下文窗口渲染成"实际生效值（配置来源）"。
+     *
+     * <h2>为什么不能直接回配置里的字符串</h2>
+     * <p>{@code qa.local.num-ctx} 的默认值是 {@code auto} —— 直接回它，
+     * 界面上就永远显示"auto"。可有可无吗？<b>不行</b>：
+     * 配 auto 的人恰恰是<b>不知道自己的机器能跑多大窗口</b>的人，
+     * 他打开系统状态页就是想看这件事，结果还是看到"auto"，等于白看。
+     * 而 {@code NumCtxResolver} 早就已经把显存探测做完了，把结果露出来是零成本的。
+     *
+     * <p>所以渲染成 {@code 16384（auto：按显存自动选定）} 或 {@code 8192（显式配置）}：
+     * 既有数字、又说明这个数字是自己配的还是探测来的 ——
+     * 后者在"为什么别人的机器上下文更大"这类问题上是关键信息。
+     *
+     * @return 可读的上下文窗口描述
+     */
+    private String describeNumCtx() {
+        String configured = properties.getLocal().getNumCtx();
+        int resolved = numCtxResolver.resolve();
+        boolean auto = configured == null || "auto".equalsIgnoreCase(configured.trim());
+        return resolved + (auto ? "（auto：按显存自动选定）" : "（显式配置）");
     }
 
     /**
