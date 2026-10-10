@@ -367,6 +367,26 @@ onBeforeUnmount(() => {
           class="dialog-alert"
           :title="`云端暂不可用：${status.cloudBlockedReason || '未配置'}`" />
 
+      <!--
+        自检失败必须在这里也说一遍：云端"可用"判断的是**配置齐备**（base-url + 模型名 + Key
+        非空），它回答不了"这把 Key 真的能用吗"。实测换错 Key 时 cloudReady 仍是 true，
+        于是弹窗显示"云端可用"、切过去提问却 401。把最近一次自检结论带进来，
+        让用户在切之前就看到真相。
+      -->
+      <el-alert
+          v-if="status?.lastCloudCheck && !status.lastCloudCheck.allOk"
+          type="error"
+          :closable="false"
+          show-icon
+          class="dialog-alert"
+          :title="`最近一次连通性自检未通过（${status.lastCloudCheck.checkedAt.replace('T', ' ').slice(5, 19)}）：端点或 Key 有问题，切到云端后提问会失败`">
+        <div class="dialog-alert-detail">
+          <div v-for="item in status.lastCloudCheck.items" :key="item.target">
+            {{ item.target === 'chat' ? '对话' : '向量' }}：{{ item.message }}
+          </div>
+        </div>
+      </el-alert>
+
       <el-descriptions :column="1" border size="small" class="dialog-desc">
         <el-descriptions-item label="当前对话模型">
           {{ status?.chatModel }}
@@ -563,6 +583,12 @@ onBeforeUnmount(() => {
 
 .dialog-alert {
   margin-bottom: 12px;
+}
+
+.dialog-alert-detail {
+  font-size: 12px;
+  line-height: 1.7;
+  margin-top: 4px;
 }
 
 .dialog-desc {

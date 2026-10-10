@@ -4,6 +4,7 @@ import com.itjiang.qa.assistant.QaAssistant;
 import com.itjiang.qa.common.AnswerGuard;
 import com.itjiang.qa.common.BusinessException;
 import com.itjiang.qa.common.ErrorCode;
+import com.itjiang.qa.common.FailureTranslator;
 import com.itjiang.qa.config.QaProperties;
 import com.itjiang.qa.context.UserContext;
 import com.itjiang.qa.model.dto.ChatRequest;
@@ -268,6 +269,25 @@ public class ChatService {
             // 所以覆盖参数要在这里设置，拿到流之后立刻清掉
             RecordingContentRetriever.applyOverrides(request.topK(), request.minScore());
             tokenStream = assistant.chatStream(conversationId, composeUserMessage(question, longTermMemory));
+        } catch (Exception ex) {
+            // ★ 关键：检索与首次调用都在返回流之前同步发生，因此这里能拦到
+            //   "Key 无效 / 余额不足 / 连不上" 这类一上来就失败的情况。
+            //
+            //   不拦的后果（P6 演练实测）：异常冒泡到全局处理器 → HTTP 500 +
+            //   业务码 9000「系统内部错误」。而前端是按 SSE 事件渲染的，
+            //   它只看到"请求失败（HTTP 500）"，连是 Key 错了还是服务崩了都分不清。
+            //   改成推一条 error 事件，就能复用与同步路径完全相同的翻译结果。
+            RecordingContentRetriever.clear();
+            String message = friendlyMessage(ex);
+            log.warn("流式问答在建立连接阶段失败: conversationId={}, 原因={}", conversationId, FailureTranslator.rootMessage(ex));
+            try {
+                sendEvent(emitter, "error", Map.of("message", message));
+            } catch (Exception sendFailure) {
+                // 推不出去只能放弃：此时连接可能已经断了，再抛也没人接
+                log.warn("错误事件推送失败: conversationId={}", conversationId);
+            }
+            emitter.complete();
+            return emitter;
         } finally {
             RecordingContentRetriever.clearOverrides();
         }
@@ -426,26 +446,15 @@ public class ChatService {
     /**
      * 把底层异常翻译成用户能看懂的业务错误。
      *
-     * <p>{@code ConnectException} 对用户毫无意义，而"Ollama 连不上，请确认已启动"
-     * 能让他自己解决问题 —— 绝大多数"系统坏了"的反馈，本质只是依赖没起来。
+     * <p>映射规则集中在 {@link FailureTranslator}：那是"故障 → 用户看到什么"的唯一出处，
+     * 同一个故障在同步与流式两条路径必须给同一句话，用户才不会以为是两个问题。
      *
      * @param ex       原始异常
      * @param question 用户问题（只记长度，不记内容，避免日志堆积用户数据）
      * @return 翻译后的业务异常
      */
     private BusinessException translateFailure(Exception ex, String question) {
-        if (hasCause(ex, ConnectException.class) || hasCause(ex, UnknownHostException.class)) {
-            log.warn("调用模型失败（连接不上）: {}", rootMessage(ex));
-            return new BusinessException(ErrorCode.UPSTREAM_UNAVAILABLE,
-                    "连接不上本地模型服务。请确认 Ollama 已启动（默认 http://localhost:11434）。", ex);
-        }
-        if (hasCause(ex, SocketTimeoutException.class)) {
-            log.warn("调用模型超时: {}", rootMessage(ex));
-            return new BusinessException(ErrorCode.CHAT_MODEL_ERROR,
-                    "模型响应超时。首次提问需要加载模型，可能耗时较久；若持续超时请检查显存是否充足。", ex);
-        }
-        log.error("调用模型失败（未预期）: 问题长度={}", question.length(), ex);
-        return new BusinessException(ErrorCode.CHAT_MODEL_ERROR, null, ex);
+        return FailureTranslator.toBusinessException(ex, question);
     }
 
     /**
@@ -455,45 +464,7 @@ public class ChatService {
      * @return 提示文案
      */
     private String friendlyMessage(Throwable error) {
-        if (hasCause(error, ConnectException.class) || hasCause(error, UnknownHostException.class)) {
-            return "连接不上本地模型服务，请确认 Ollama 已启动。";
-        }
-        if (hasCause(error, SocketTimeoutException.class)) {
-            return "模型响应超时，请稍后重试。";
-        }
-        return "生成回答时发生错误，请重试。";
-    }
-
-    /**
-     * 判断异常链中是否包含指定类型。
-     *
-     * @param throwable 起始异常
-     * @param type      目标类型
-     * @return 命中返回 {@code true}
-     */
-    private boolean hasCause(Throwable throwable, Class<? extends Throwable> type) {
-        Throwable current = throwable;
-        // 限制深度，防止异常链成环导致死循环
-        for (int depth = 0; current != null && depth < 10; depth++) {
-            if (type.isInstance(current)) {
-                return true;
-            }
-            current = current.getCause();
-        }
-        return false;
-    }
-
-    /**
-     * 取异常链最底层的消息。
-     *
-     * @param throwable 起始异常
-     * @return 最底层异常消息
-     */
-    private String rootMessage(Throwable throwable) {
-        Throwable current = throwable;
-        for (int depth = 0; current.getCause() != null && depth < 10; depth++) {
-            current = current.getCause();
-        }
-        return current.getMessage();
+        String message = FailureTranslator.message(error);
+        return message == null ? "生成回答时发生错误，请重试。" : message;
     }
 }

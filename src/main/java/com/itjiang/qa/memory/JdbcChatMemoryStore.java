@@ -7,6 +7,7 @@ import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.model.TokenCountEstimator;
 import dev.langchain4j.store.memory.chat.ChatMemoryStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,9 +50,11 @@ public class JdbcChatMemoryStore implements ChatMemoryStore {
     private static final Logger log = LoggerFactory.getLogger(JdbcChatMemoryStore.class);
 
     private final MessageMapper messageMapper;
+    private final TokenCountEstimator estimator;
 
-    public JdbcChatMemoryStore(MessageMapper messageMapper) {
+    public JdbcChatMemoryStore(MessageMapper messageMapper, TokenCountEstimator estimator) {
         this.messageMapper = messageMapper;
+        this.estimator = estimator;
     }
 
     /**
@@ -93,6 +96,13 @@ public class JdbcChatMemoryStore implements ChatMemoryStore {
         }
         log.debug("装载会话记忆: conversationId={}, 历史消息 {} 条（另含系统提示词）",
                 conversationId, messages.size() - 1);
+        // 顺带给出 token 估算：只有条数无法判断"是不是已经撑满窗口将要被裁"——
+        // 一轮长文档问答就能吃掉 2000 token，20 条也可能已经超预算。
+        // 与 ChatMemory 的裁剪用同一个估算器，两处口径一致才有可比性。
+        if (log.isDebugEnabled()) {
+            log.debug("会话记忆 token 估算: conversationId={}, 全量 {} token（窗口会在此基础上裁剪）",
+                    conversationId, estimator.estimateTokenCountInMessages(messages));
+        }
         return messages;
     }
 

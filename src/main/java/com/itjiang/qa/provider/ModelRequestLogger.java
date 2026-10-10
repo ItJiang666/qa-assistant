@@ -6,6 +6,7 @@ import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.TokenCountEstimator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -40,9 +41,11 @@ public class ModelRequestLogger {
     private static final int MAX_CHARS_PER_MESSAGE = 900;
 
     private final QaProperties properties;
+    private final TokenCountEstimator estimator;
 
-    public ModelRequestLogger(QaProperties properties) {
+    public ModelRequestLogger(QaProperties properties, TokenCountEstimator estimator) {
         this.properties = properties;
+        this.estimator = estimator;
     }
 
     /**
@@ -56,8 +59,13 @@ public class ModelRequestLogger {
             return;
         }
         StringBuilder out = new StringBuilder();
+        // 顺带给出 token 估算：排查"上下文是不是被挤爆/被截断"时，光有消息条数远远不够
+        // （一轮长文档问答就能吃掉 2000 token）。刻意复用 ChatMemory 窗口裁剪用的
+        // 同一个估算器 —— 两处口径一致，日志里的数字才与裁剪行为对得上。
+        int tokens = request.messages() == null ? 0 : estimator.estimateTokenCountInMessages(request.messages());
         out.append("[模型请求抓取] ").append(label)
-                .append(" 消息数=").append(request.messages().size());
+                .append(" 消息数=").append(request.messages().size())
+                .append(" 估算token=").append(tokens);
         int index = 0;
         for (ChatMessage message : request.messages()) {
             out.append("\n  #").append(index++).append(' ').append(describe(message));
