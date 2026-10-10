@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -43,7 +44,7 @@ public class RuntimeModelRegistry {
     private final RuntimeModeService modeService;
     private final CloudEndpointResolver cloudResolver;
 
-    /** 按模式缓存已构建的实例：构建一次要建 HTTP 客户端，不能每次请求都建。 */
+    /** 按「模式 + 云端配置快照」缓存已构建的实例：构建一次要建 HTTP 客户端，不能每次请求都建。 */
     private final Map<String, ChatModel> chatCache = new ConcurrentHashMap<>();
     private final Map<String, ChatModel> extractCache = new ConcurrentHashMap<>();
     private final Map<String, StreamingChatModel> streamingCache = new ConcurrentHashMap<>();
@@ -54,6 +55,16 @@ public class RuntimeModelRegistry {
 
     /** 向量模型：启动即定，跟配置模式走，不随运行时切换而变。 */
     private final EmbeddingModel embeddingModel;
+
+    /**
+     * 装配向量模型时的云端配置快照。
+     *
+     * <p>留着它只有一个用途：<b>发现"改了向量模型却没重启"</b>。
+     * 向量模型的来源在启动时定死（换它等于换向量空间），所以运行时改了配置
+     * 绝不能悄悄生效 —— 但也不能装作没发生：用户会以为改成功了。
+     * 于是启动时存一份，之后每次问状态都对比，不一致就明确告诉他"需重启"。
+     */
+    private final CloudEndpointResolver.CloudConfigView embeddingConfigAtStartup;
 
     public RuntimeModelRegistry(LocalModelProvider localProvider,
                                 CloudModelProvider cloudProvider,
@@ -75,6 +86,7 @@ public class RuntimeModelRegistry {
         RuntimeModeService.Mode embeddingMode = modeService.configured();
         log.info("向量模型跟随配置模式: {}（换向量模型需要重启，见类注释）", embeddingMode.value());
         this.embeddingModel = delegate(embeddingMode).embeddingModel();
+        this.embeddingConfigAtStartup = cloudResolver.configView();
     }
 
     /**
@@ -175,14 +187,20 @@ public class RuntimeModelRegistry {
      * 丢弃已缓存的对话类模型，让下次请求按当前设置重新装配。
      *
      * <h2>什么时候必须调用</h2>
-     * <p>凡是会改变"请求长什么样"的设置改了，就必须丢掉旧实例。目前有两处：
+     * <p>凡是会改变"请求长什么样"的设置改了，就必须丢掉旧实例。目前只有一处
+     * 需要显式调用：
      * <ol>
-     *   <li>对话模式切换（本地 ↔ 云端）—— 缓存键里已含模式，本可不丢；
-     *       仍然统一走这里，避免以后新增设置时漏掉一类缓存</li>
      *   <li><b>思考模式开关</b> —— 它改的是发给厂商的额外参数
      *       （如 DeepSeek 的 {@code thinking: {type: disabled}}），
-     *       而参数是<b>装配期</b>固定在模型实例上的，不丢缓存就永远不生效</li>
+     *       而参数是<b>装配期</b>固定在模型实例上的，不丢缓存就永远不生效。
+     *       它<b>不在</b>缓存键里：开关是运行时状态，不是配置</li>
+     *   <li>对话模式切换（本地 ↔ 云端）—— 缓存键里已含模式，本可不丢；
+     *       仍然统一走这里，避免以后新增设置时漏掉一类缓存</li>
      * </ol>
+     *
+     * <p><b>改 Key / 改模型名不需要调用这个方法</b>：它们已经纳入缓存键
+     * （见 {@link #cacheKey}），配置一变键就变、缓存自然未命中 ——
+     * 这比"靠人记得清缓存"可靠得多。
      *
      * <p>为什么要成对丢掉抽取与流式模型：三者共用同一份厂商配置，
      * 只丢一半会出现"同步问答关了思考、流式问答还开着"这种自相矛盾的状态。
@@ -213,11 +231,19 @@ public class RuntimeModelRegistry {
      * <p>用 {@code computeIfAbsent} 而不是自己加锁：并发首次调用只会构建一次，
      * 构建抛异常时不会留下缓存条目 —— 于是"先失败、补好配置再重试"仍然可行。
      *
+     * <p><b>缓存键里带上云端配置快照</b>：Key 与模型名是在装配那一刻固定进实例的，
+     * 若只用模式做键，运行中换了 Key / 模型名之后，{@code /status} 会显示新值
+     * 而实际请求仍用旧实例 —— 界面在撒谎。把快照纳入键之后，
+     * 配置一变缓存自然未命中、自动重装实例，不需要重启，也不需要人工清缓存。
+     *
+     * <p>本地模式不拼快照：本地模型的配置（模型名、num_ctx）改了一样要重启才有意义，
+     * 而且它不涉及凭据，纳入键只会让缓存无谓地膨胀。
+     *
      * @param mode 模式
      * @return 对话模型
      */
     private ChatModel chatFor(RuntimeModeService.Mode mode) {
-        return chatCache.computeIfAbsent(mode.value(), key -> delegate(mode).chatModel());
+        return chatCache.computeIfAbsent(cacheKey(mode), key -> delegate(mode).chatModel());
     }
 
     /**
@@ -227,7 +253,7 @@ public class RuntimeModelRegistry {
      * @return 抽取模型
      */
     private ChatModel extractFor(RuntimeModeService.Mode mode) {
-        return extractCache.computeIfAbsent(mode.value(), key -> delegate(mode).extractChatModel());
+        return extractCache.computeIfAbsent(cacheKey(mode), key -> delegate(mode).extractChatModel());
     }
 
     /**
@@ -237,6 +263,42 @@ public class RuntimeModelRegistry {
      * @return 流式模型
      */
     private StreamingChatModel streamingFor(RuntimeModeService.Mode mode) {
-        return streamingCache.computeIfAbsent(mode.value(), key -> delegate(mode).streamingChatModel());
+        return streamingCache.computeIfAbsent(cacheKey(mode), key -> delegate(mode).streamingChatModel());
+    }
+
+    /**
+     * 组装模型缓存键。
+     *
+     * <p>云端模式下包含配置快照（厂商 / 端点 / 模型名 / Key 掩码），
+     * 本地模式下只有模式名。快照里只有掩码、没有明文密钥，因此可以安全地
+     * 出现在缓存键里（它不会被打印，但即便被打印也不泄露）。
+     *
+     * @param mode 模式
+     * @return 缓存键
+     */
+    String cacheKey(RuntimeModeService.Mode mode) {
+        if (mode != RuntimeModeService.Mode.CLOUD) {
+            return mode.value();
+        }
+        CloudEndpointResolver.CloudConfigView view = cloudResolver.configView();
+        return mode.value() + '|' + view.chatProviderId() + '|' + view.chatBaseUrl() + '|'
+                + view.chatModel() + '|' + view.chatApiKeyMasked();
+    }
+
+    /**
+     * 当前配置的向量模型是否与启动时装配的不一致。
+     *
+     * <p>不一致意味着"改了配置但没重启"：此时继续用旧向量模型是对的
+     * （换向量空间必须连索引一起重建），但必须明确告知，不能装作没发生。
+     *
+     * @return 不一致返回 {@code true}
+     */
+    public boolean embeddingConfigChanged() {
+        CloudEndpointResolver.CloudConfigView current = cloudResolver.configView();
+        return !Objects.equals(embeddingConfigAtStartup.embeddingProviderId(), current.embeddingProviderId())
+                || !Objects.equals(embeddingConfigAtStartup.embeddingModel(), current.embeddingModel())
+                || !Objects.equals(embeddingConfigAtStartup.embeddingDimension(), current.embeddingDimension())
+                || !Objects.equals(embeddingConfigAtStartup.embeddingBaseUrl(), current.embeddingBaseUrl())
+                || !Objects.equals(embeddingConfigAtStartup.embeddingApiKeyMasked(), current.embeddingApiKeyMasked());
     }
 }

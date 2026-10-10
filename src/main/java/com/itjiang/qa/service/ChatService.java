@@ -64,17 +64,57 @@ public class ChatService {
     private final ConversationService conversationService;
     private final LongTermMemoryService longTermMemoryService;
     private final MemoryExtractService memoryExtractService;
+    private final MetaQuestionService metaQuestionService;
 
     public ChatService(QaAssistant assistant,
                        QaProperties properties,
                        ConversationService conversationService,
                        LongTermMemoryService longTermMemoryService,
-                       MemoryExtractService memoryExtractService) {
+                       MemoryExtractService memoryExtractService,
+                       MetaQuestionService metaQuestionService) {
         this.assistant = assistant;
         this.properties = properties;
         this.conversationService = conversationService;
         this.longTermMemoryService = longTermMemoryService;
         this.memoryExtractService = memoryExtractService;
+        this.metaQuestionService = metaQuestionService;
+    }
+
+    /**
+     * 元问题 / 测试口令的流式回答。
+     *
+     * <p>把整段回答作为<b>一条 delta</b> 推出去，而不是逐字伪造流式效果：
+     * 固定文案只有百来字，前端渲染一瞬间完成，伪造打字机效果只会让人误以为
+     * "模型在思考"，反而掩盖了"这条没走模型"这个事实（回答正文里已经写明）。
+     *
+     * <p>事件序列与正常路径完全一致（meta → delta → done），前端不需要任何分叉。
+     *
+     * @param emitter        SSE 发射器
+     * @param conversationId 会话 ID
+     * @param question       用户问题
+     * @param kind           命中类别
+     * @param startNanos     起始纳秒
+     */
+    private void emitMetaAnswer(SseEmitter emitter, String conversationId, String question,
+                                String kind, long startNanos) {
+        String answer = metaQuestionService.reply(kind);
+        try {
+            sendEvent(emitter, "delta", Map.of("text", answer));
+            conversationService.appendMessage(conversationId, "user", question);
+            conversationService.appendMessage(conversationId, "assistant", answer);
+            long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
+            log.info("元问题短路回答: conversationId={}, 类别={}, 耗时 {} ms（未调用模型）",
+                    conversationId, kind, elapsedMs);
+            sendEvent(emitter, "done", Map.of(
+                    "conversationId", conversationId,
+                    "elapsedMs", elapsedMs,
+                    "model", "（固定回复，未调用模型）",
+                    "sources", List.of()));
+        } catch (Exception ex) {
+            log.warn("元问题回答推送失败: conversationId={}, 原因={}", conversationId, ex.getMessage());
+        } finally {
+            emitter.complete();
+        }
     }
 
     /**
@@ -90,6 +130,13 @@ public class ChatService {
 
         String conversationId = conversationService.ensureConversation(
                 userId, request.conversationId(), question);
+
+        // 元问题 / 测试口令走短路：不进检索、不调模型（原因见 MetaQuestionService 类注释）。
+        // 放在 ensureConversation 之后：会话仍然要建出来，回答才有一条完整的记录。
+        String metaKind = metaQuestionService.match(question);
+        if (metaKind != null) {
+            return answerMetaQuestion(conversationId, question, metaKind, startNanos);
+        }
 
         // L3 长期记忆：跨会话，由我们自己查好后传给助手（框架不管这件事）
         String longTermMemory = longTermMemoryService.loadForPrompt(userId);
@@ -146,6 +193,39 @@ public class ChatService {
     }
 
     /**
+     * 元问题 / 测试口令的同步回答。
+     *
+     * <p>与正常问答的差别只在"答案从哪来"：检索、模型、空回答守卫都不参与；
+     * <b>落库与返回结构完全一致</b>，这样前端与审计都看不出两条路径的区别，
+     * 用户点开会话也不会看到"问过但没答"的空洞。
+     *
+     * <p><b>不触发长期记忆抽取</b>：元问题里不可能含"关于用户的偏好或事实"，
+     * 白跑一次抽取模型既费额度又可能抽错东西记下来。
+     *
+     * @param conversationId 会话 ID
+     * @param question       用户问题
+     * @param kind           命中类别
+     * @param startNanos     起始纳秒（与正常路径共用同一套耗时口径）
+     * @return 问答响应（引用来源为空）
+     */
+    private ChatResponse answerMetaQuestion(String conversationId, String question,
+                                           String kind, long startNanos) {
+        String answer = metaQuestionService.reply(kind);
+        conversationService.appendMessage(conversationId, "user", question);
+        conversationService.appendMessage(conversationId, "assistant", answer);
+        long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
+        log.info("元问题短路回答: conversationId={}, 类别={}, 耗时 {} ms（未调用模型）",
+                conversationId, kind, elapsedMs);
+        return new ChatResponse(
+                conversationId,
+                answer,
+                List.of(),
+                elapsedMs,
+                RunMode.from(properties.getMode()).getValue(),
+                properties.getLocal().getChatModel());
+    }
+
+    /**
      * 流式问答：逐字推送，结束后落库。
      *
      * <p><b>这是统一响应体的唯一例外</b>（开发文档 4.2 约定）：
@@ -160,17 +240,27 @@ public class ChatService {
         String question = request.question().trim();
         String conversationId = conversationService.ensureConversation(
                 userId, request.conversationId(), question);
-        String longTermMemory = longTermMemoryService.loadForPrompt(userId);
 
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
+        // 先推一条 meta，让前端立刻拿到 conversationId 并开始渲染，不必等第一个 token
+        sendEvent(emitter, "meta", Map.of("conversationId", conversationId));
+
+        long startNanos = System.nanoTime();
+
+        // 元问题 / 测试口令走短路（与同步路径同一判据，见 MetaQuestionService）。
+        // 直接推一条 delta + done 收掉：前端不必为它分叉，
+        // 因为"整段一次到达"本来就是流式协议允许的一种形态。
+        String metaKind = metaQuestionService.match(question);
+        if (metaKind != null) {
+            emitMetaAnswer(emitter, conversationId, question, metaKind, startNanos);
+            return emitter;
+        }
+
+        String longTermMemory = longTermMemoryService.loadForPrompt(userId);
         StringBuilder buffer = new StringBuilder();
         // 流式场景下检索结果通过 onRetrieved 回调送进来，用 AtomicReference 承接
         // （回调可能在任何线程上执行，普通变量会有可见性问题）
         AtomicReference<List<ChatResponse.Source>> sourcesRef = new AtomicReference<>(List.of());
-        long startNanos = System.nanoTime();
-
-        // 先推一条 meta，让前端立刻拿到 conversationId 并开始渲染，不必等第一个 token
-        sendEvent(emitter, "meta", Map.of("conversationId", conversationId));
 
         TokenStream tokenStream;
         try {

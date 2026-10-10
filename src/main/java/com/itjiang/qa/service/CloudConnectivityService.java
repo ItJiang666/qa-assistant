@@ -11,8 +11,10 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 云端连通性自检。
@@ -47,6 +49,20 @@ public class CloudConnectivityService {
     private final CloudEndpointResolver resolver;
     private final HttpClient httpClient;
 
+    /**
+     * 最近一次自检的结论。
+     *
+     * <h2>为什么要把结论留在内存里</h2>
+     * <p>自检是"用户点一下才发生"的：点完看到"两个端点都连通"，然后关掉弹窗，
+     * 这个结论就消失了。而它恰恰是回答"我刚换的 Key 到底生效了没有"的<b>唯一证据</b>——
+     * 换 Key 之后页面上其他任何地方都看不出差别（Key 相同厂商时连厂商名都不变）。
+     * 所以留一份在内存里，随 {@code /status} 一起回给界面。
+     *
+     * <p>同时记下<b>自检时的配置快照</b>：若之后配置又变了，界面就能说
+     * "这个结论已经过期，请重新自检"，而不是让用户拿着旧结论下判断。
+     */
+    private final AtomicReference<LastCheck> lastCheck = new AtomicReference<>();
+
     public CloudConnectivityService(CloudEndpointResolver resolver) {
         this.resolver = resolver;
         this.httpClient = HttpClient.newBuilder()
@@ -56,7 +72,7 @@ public class CloudConnectivityService {
     }
 
     /**
-     * 检查对话与向量两个端点。
+     * 检查对话与向量两个端点，并记住本次结论。
      *
      * @return 自检结果
      */
@@ -64,7 +80,47 @@ public class CloudConnectivityService {
         List<CloudCheckResponse.Item> items = new ArrayList<>();
         items.add(check("chat", resolver.chat()));
         items.add(check("embedding", resolver.embedding()));
-        return new CloudCheckResponse(items);
+        CloudCheckResponse response = new CloudCheckResponse(items);
+        lastCheck.set(new LastCheck(
+                OffsetDateTime.now().toString(),
+                resolver.configView(),
+                items.stream().allMatch(CloudCheckResponse.Item::ok),
+                response));
+        return response;
+    }
+
+    /**
+     * 最近一次自检的结论。
+     *
+     * @return 最近结论；从未自检时返回 {@code null}
+     */
+    public LastCheck lastCheck() {
+        return lastCheck.get();
+    }
+
+    /**
+     * 最近一次自检的结论及其"新鲜度"信息。
+     *
+     * @param checkedAt        自检时刻（ISO-8601）
+     * @param configAtCheck    自检时的云端配置快照，用于判断结论是否已过期
+     * @param allOk            是否全部通过
+     * @param result           原始自检结果（与原接口返回体完全一致）
+     */
+    public record LastCheck(
+            String checkedAt,
+            CloudEndpointResolver.CloudConfigView configAtCheck,
+            boolean allOk,
+            CloudCheckResponse result) {
+
+        /**
+         * 结论相对当前配置是否已过期。
+         *
+         * @param current 当前配置快照
+         * @return 配置已变（结论不再可信）返回 {@code true}
+         */
+        public boolean stale(CloudEndpointResolver.CloudConfigView current) {
+            return !configAtCheck.sameAs(current);
+        }
     }
 
     /**

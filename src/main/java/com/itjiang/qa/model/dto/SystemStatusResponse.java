@@ -1,5 +1,10 @@
 package com.itjiang.qa.model.dto;
 
+import com.itjiang.qa.provider.CloudEndpointResolver;
+
+import java.util.List;
+
+
 /**
  * 系统状态响应（F9）。
  *
@@ -48,6 +53,12 @@ package com.itjiang.qa.model.dto;
  * @param thinkingConfigured 配置里的思考模式默认值（重启后回到的那个值）
  * @param thinkingOverridden 思考模式是否被运行时改过
  * @param thinkingSwitchable 当前厂商预设是否声明了"怎么关思考"；未声明时界面不该给开关
+ * @param config             云端配置快照（含 Key 掩码，绝不含明文）——
+ *                           前端据此发现"后端配置变了、页面该刷新了"
+ * @param embeddingConfigChanged 当前配置的向量模型是否与启动时装配的不一致
+ *                               （不一致就必须重启，见 {@code RuntimeModelRegistry}）
+ * @param lastCloudCheck     最近一次连通性自检的结论；从未自检时为 {@code null}
+ * @param storage            存储位置明细（数据目录、数据库文件、向量库落盘文件）
  * @author Jiang
  */
 public record SystemStatusResponse(
@@ -78,8 +89,51 @@ public record SystemStatusResponse(
         boolean thinkingConfigured,
         boolean thinkingOverridden,
         boolean thinkingSwitchable,
+        CloudEndpointResolver.CloudConfigView config,
+        boolean embeddingConfigChanged,
+        LastCloudCheck lastCloudCheck,
+        StorageInfo storage,
         RetrievalSettings retrieval
 ) {
+
+    /**
+     * 最近一次连通性自检的结论。
+     *
+     * <p>换 Key 之后页面上别处都看不出差别（同厂商时连厂商名都不变），
+     * 这个字段是"新 Key 到底生效了没有"的唯一证据来源。
+     *
+     * @param checkedAt 自检时刻（ISO-8601）
+     * @param allOk     是否全部通过
+     * @param stale     结论是否已过期（自检之后配置又变了）
+     * @param items     逐端点结论（与原自检接口返回的明细一致）
+     */
+    public record LastCloudCheck(
+            String checkedAt,
+            boolean allOk,
+            boolean stale,
+            List<CloudCheckResponse.Item> items) {
+    }
+
+    /**
+     * 存储位置明细。
+     *
+     * <h2>为什么要单独列出来</h2>
+     * <p>界面上原本只显示"数据库类型 + 数据目录"，用户看到后仍然会问三个问题：
+     * <b>长期记忆存在哪、对话存在哪、向量存在哪</b>。事实上前两者在<b>同一个文件库</b>里
+     * （表 {@code qa_memory} / {@code qa_message}），向量库则是"内存态 + 落盘文件"。
+     * 与其让人猜，不如把三个路径直接写出来。
+     *
+     * @param databaseFile    H2 数据库文件（长期记忆与对话都在里面）
+     * @param vectorStoreFile 向量库落盘文件
+     * @param uploadDir       上传原件目录
+     * @param dataDirSource   数据目录的来源说明（配置值 / 环境变量覆盖）
+     */
+    public record StorageInfo(
+            String databaseFile,
+            String vectorStoreFile,
+            String uploadDir,
+            String dataDirSource) {
+    }
 
     /**
      * 当前生效的检索参数（供"系统状态"页展示）。

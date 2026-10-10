@@ -12,6 +12,7 @@ import org.springframework.core.env.Environment;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.nio.file.Path;
 import java.util.List;
 
 /**
@@ -39,6 +40,7 @@ public class SystemStatusService {
     private final RuntimeModeService modeService;
     private final CloudEndpointResolver cloudResolver;
     private final ThinkingModeService thinkingMode;
+    private final CloudConnectivityService connectivityService;
 
     public SystemStatusService(QaProperties properties,
                                DocumentMapper documentMapper,
@@ -47,7 +49,8 @@ public class SystemStatusService {
                                RuntimeModelRegistry modelRegistry,
                                RuntimeModeService modeService,
                                CloudEndpointResolver cloudResolver,
-                               ThinkingModeService thinkingMode) {
+                               ThinkingModeService thinkingMode,
+                               CloudConnectivityService connectivityService) {
         this.properties = properties;
         this.documentMapper = documentMapper;
         this.jdbcTemplate = jdbcTemplate;
@@ -56,6 +59,7 @@ public class SystemStatusService {
         this.modeService = modeService;
         this.cloudResolver = cloudResolver;
         this.thinkingMode = thinkingMode;
+        this.connectivityService = connectivityService;
     }
 
     /**
@@ -100,6 +104,10 @@ public class SystemStatusService {
                 thinkingMode.configured(),
                 thinkingMode.overridden(),
                 cloudResolver.thinkingSwitchSupported(),
+                cloudResolver.configView(),
+                modelRegistry.embeddingConfigChanged(),
+                describeLastCheck(),
+                storageInfo(),
                 new SystemStatusResponse.RetrievalSettings(
                         properties.getRetrieval().getTopK(),
                         properties.getRetrieval().getMinScore(),
@@ -107,6 +115,52 @@ public class SystemStatusService {
                         properties.getRetrieval().getQueryExpansion().getExtraQueries(),
                         properties.getIngest().getChunkSize(),
                         properties.getIngest().getChunkOverlap()));
+    }
+
+    /**
+     * 最近一次连通性自检的结论（供界面回答"我新换的 Key 生效了吗"）。
+     *
+     * <p>{@code stale} 是这里最关键的字段：自检是某一时刻的快照，
+     * 若之后配置又变了（比如又换了一把 Key），那个"连通正常"就不再可信 ——
+     * 界面必须说"结论已过期、请重新自检"，而不是让用户拿旧结论下判断。
+     *
+     * @return 结论；从未自检时返回 {@code null}
+     */
+    private SystemStatusResponse.LastCloudCheck describeLastCheck() {
+        CloudConnectivityService.LastCheck last = connectivityService.lastCheck();
+        if (last == null) {
+            return null;
+        }
+        return new SystemStatusResponse.LastCloudCheck(
+                last.checkedAt(),
+                last.allOk(),
+                last.stale(cloudResolver.configView()),
+                last.result().items());
+    }
+
+    /**
+     * 存储位置明细。
+     *
+     * <p>三个路径都从<b>生效配置</b>推导，而不是硬编码 {@code ~/.qa-assistant}：
+     * 用户可能用 {@code QA_DATA_DIR} 把数据整体搬到了 D 盘，
+     * 那时界面上写死默认路径就是在误导他去找错地方。
+     *
+     * <p>{@code dataDirSource} 说明这个目录是"配置默认值"还是"被环境变量改过"——
+     * 排查"我的数据到底在哪个盘"时，这一行比路径本身更有用。
+     *
+     * @return 存储明细
+     */
+    private SystemStatusResponse.StorageInfo storageInfo() {
+        Path dataDir = properties.dataPath().toAbsolutePath().normalize();
+        String fromEnv = environment.getProperty("QA_DATA_DIR");
+        String source = (fromEnv == null || fromEnv.isBlank())
+                ? "配置默认值（可用环境变量 QA_DATA_DIR 覆盖，改后需重启）"
+                : "环境变量 QA_DATA_DIR=" + fromEnv.trim() + "（改后需重启）";
+        return new SystemStatusResponse.StorageInfo(
+                dataDir.resolve("data").resolve("qa.mv.db").toString(),
+                dataDir.resolve("index").resolve("embedding-store.json").toString(),
+                dataDir.resolve("uploads").toString(),
+                source);
     }
 
     /**

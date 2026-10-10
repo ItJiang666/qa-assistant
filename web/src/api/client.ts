@@ -117,6 +117,44 @@ export interface SystemStatus {
   thinkingOverridden: boolean
   /** 当前厂商预设是否声明了"怎么关思考"；为 false 时开关点了也没用，界面应置灰。 */
   thinkingSwitchable: boolean
+  // ── v1.13：配置指纹与状态新鲜度 ──────────────────────────────────
+  /**
+   * 云端配置快照（含 Key 掩码，绝不含明文）。
+   *
+   * 用途是**发现"后端配置变了"**：改 .env 后必须重启后端，而浏览器页面不会自己刷新，
+   * 页头页脚会一直显示重启前的旧值。前端把这个对象序列化后与上次比较，
+   * 不一致就提示刷新 —— 否则界面就是在撒谎。
+   */
+  config: {
+    chatProviderId: string | null
+    chatBaseUrl: string | null
+    chatModel: string | null
+    /** Key 掩码（末四位），用于核对"现在用的是哪一把"；未配置时为 null。 */
+    chatApiKeyMasked: string | null
+    embeddingProviderId: string | null
+    embeddingBaseUrl: string | null
+    embeddingModel: string | null
+    embeddingDimension: number | null
+    embeddingApiKeyMasked: string | null
+    dataDir: string
+  }
+  /** 配置里的向量模型是否与启动时装配的不一致（不一致必须重启）。 */
+  embeddingConfigChanged: boolean
+  /** 最近一次连通性自检的结论；从未自检时为 null。 */
+  lastCloudCheck: {
+    checkedAt: string
+    allOk: boolean
+    /** 结论是否已过期（自检之后配置又变了）。 */
+    stale: boolean
+    items: CloudCheckItem[]
+  } | null
+  /** 存储位置明细：长期记忆/对话在同一个 H2 文件里，向量库是内存态 + 落盘文件。 */
+  storage: {
+    databaseFile: string
+    vectorStoreFile: string
+    uploadDir: string
+    dataDirSource: string
+  }
   /** 当前生效的检索与分块参数。 */
   retrieval: {
     topK: number

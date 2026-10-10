@@ -288,6 +288,105 @@ public class CloudEndpointResolver {
     }
 
     /**
+     * 当前云端配置的"可比较快照"。
+     *
+     * <h2>它解决什么问题（两个真实缺口）</h2>
+     * <p>原先有两处"界面在撒谎"的情况：
+     * <ol>
+     *   <li><b>运行中改了 Key / 模型名</b>：{@code /status} 每次调用都实时读配置，
+     *       于是界面立刻显示新值；但模型实例是按模式缓存的，Key 与模型名在
+     *       <b>装配那一刻</b>就固定进实例了，实际请求仍在用旧配置 ——
+     *       用户看到的是"改好了"，实际没生效</li>
+     *   <li><b>前端不知道后端变了</b>：改配置必然重启后端，而浏览器页面不会自己刷新，
+     *       页头页脚会一直显示重启前的旧值</li>
+     * </ol>
+     *
+     * <p>这个快照同时解决两者：把它做成<b>模型缓存的键</b>（配置一变就自动重装实例），
+     * 也回给前端做比对（变化就提示刷新）。
+     *
+     * <h2>为什么 Key 只放掩码</h2>
+     * <p>快照会出现在接口响应与日志里，绝不能含明文 Key。
+     * 用"掩码后的末四位"而不是哈希：既能区分"换了 Key"，
+     * 又让人一眼看出"现在用的是哪一把"，出问题时可直接核对（哈希做不到这一点）。
+     * 长度不足以掩码时统一写 {@code ***}，不泄露长度信息。
+     *
+     * @return 配置快照
+     */
+    public CloudConfigView configView() {
+        ResolvedEndpoint chat = chat();
+        ResolvedEndpoint embedding = embedding();
+        return new CloudConfigView(
+                chat.providerId(),
+                chat.baseUrl(),
+                chat.model(),
+                maskKey(chat.apiKey()),
+                embedding.providerId(),
+                embedding.baseUrl(),
+                embedding.model(),
+                embedding.dimension(),
+                maskKey(embedding.apiKey()),
+                properties.dataPath().toAbsolutePath().normalize().toString());
+    }
+
+    /**
+     * 把 Key 掩码成"可识别但不可用"的短串。
+     *
+     * <p>保留末四位是为了让用户能核对"现在用的是哪一把 Key"——
+     * 换 Key 后最怕的就是不确定新的有没有被读到。
+     * 前缀一律统一成 {@code ***}，不暴露 Key 的长度与厂商标识。
+     *
+     * @param apiKey 原始 Key，可为 {@code null}
+     * @return 掩码串；未配置时返回 {@code null}
+     */
+    private String maskKey(String apiKey) {
+        if (isBlank(apiKey)) {
+            return null;
+        }
+        String trimmed = apiKey.trim();
+        return trimmed.length() < 8 ? "***" : "***" + trimmed.substring(trimmed.length() - 4);
+    }
+
+    /**
+     * 云端配置快照（不含任何明文密钥）。
+     *
+     * @param chatProviderId      对话厂商预设 id
+     * @param chatBaseUrl         对话端点根地址
+     * @param chatModel           对话模型名
+     * @param chatApiKeyMasked    对话 Key 掩码（末四位）
+     * @param embeddingProviderId 向量厂商预设 id
+     * @param embeddingBaseUrl    向量端点根地址
+     * @param embeddingModel      向量模型名
+     * @param embeddingDimension  向量维度；未声明时为 {@code null}
+     * @param embeddingApiKeyMasked 向量 Key 掩码（末四位）
+     * @param dataDir             运行时数据目录（改它同样必须重启）
+     */
+    public record CloudConfigView(
+            String chatProviderId,
+            String chatBaseUrl,
+            String chatModel,
+            String chatApiKeyMasked,
+            String embeddingProviderId,
+            String embeddingBaseUrl,
+            String embeddingModel,
+            Integer embeddingDimension,
+            String embeddingApiKeyMasked,
+            String dataDir) {
+
+        /**
+         * 是否与另一份快照等价。
+         *
+         * <p>用 record 自带的 {@code equals}：字段全比、浅比较，正是这里要的语义
+         * （少比一个字段就会漏掉一类"改了没生效"）。
+         *
+         * @param other 另一份快照
+         * @return 等价返回 {@code true}
+         */
+        public boolean sameAs(CloudConfigView other) {
+            return other != null && equals(other);
+        }
+    }
+
+    /**
      * 解析后的端点。
      *
      * <p>{@link #usable()} 同时要求 base-url、model、api-key 三者齐备 —— 少任何一样，

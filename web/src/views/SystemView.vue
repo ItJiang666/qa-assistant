@@ -147,6 +147,32 @@ onMounted(load)
           </el-tag>
           <span v-if="!status?.cloudReady" class="hint">{{ status?.cloudBlockedReason }}</span>
         </el-descriptions-item>
+        <el-descriptions-item label="当前凭据">
+          <span class="mono">对话 Key {{ status?.config.chatApiKeyMasked || '未配置' }}</span>
+          <span class="hint">·</span>
+          <span class="mono">向量 Key {{ status?.config.embeddingApiKeyMasked || '未配置' }}</span>
+          <div class="hint">
+            只显示末四位，用于核对"换的 Key 到底被读到没有"；改 Key 必须重启后端
+          </div>
+        </el-descriptions-item>
+        <el-descriptions-item label="上次连通性自检" :span="2">
+          <template v-if="status?.lastCloudCheck">
+            <el-tag size="small" :type="status.lastCloudCheck.allOk ? 'success' : 'danger'">
+              {{ status.lastCloudCheck.allOk ? '全部通过' : '有端点未通过' }}
+            </el-tag>
+            <span class="mono hint">{{ status.lastCloudCheck.checkedAt.replace('T', ' ').slice(0, 19) }}</span>
+            <el-tag v-if="status.lastCloudCheck.stale" size="small" type="warning">
+              结论已过期：自检之后配置又变了，请重新自检
+            </el-tag>
+          </template>
+          <span v-else class="hint">本次启动尚未自检 —— 换 Key 之后点一次自检，才能确认新 Key 真的生效</span>
+        </el-descriptions-item>
+        <el-descriptions-item v-if="status?.embeddingConfigChanged" label="向量模型配置" :span="2">
+          <el-tag size="small" type="warning">配置已改，但当前仍用启动时装配的模型</el-tag>
+          <div class="hint">
+            换向量模型等于换向量空间，必须重启应用并重建索引；重启前检索结果仍由旧模型产生
+          </div>
+        </el-descriptions-item>
         <el-descriptions-item label="思考模式" :span="2">
           <el-switch
               :model-value="status?.thinkingEnabled"
@@ -174,19 +200,33 @@ onMounted(load)
 
     <el-card shadow="never" class="block">
       <template #header><span class="card-title">数据与存储</span></template>
-      <el-descriptions :column="2" border size="small">
+      <el-descriptions :column="1" border size="small">
         <el-descriptions-item label="数据目录">
           <span class="mono">{{ status?.dataDir }}</span>
+          <div class="hint">来源：{{ status?.storage.dataDirSource }}</div>
         </el-descriptions-item>
-        <el-descriptions-item label="数据库 / 向量库">
-          {{ status?.database }} · {{ status?.vectorStore }}
+        <el-descriptions-item label="长期记忆 + 对话">
+          <span class="mono">{{ status?.storage.databaseFile }}</span>
+          <div class="hint">
+            两者在<b>同一个文件库</b>里（表 qa_memory / qa_message），所以"清空记忆"与
+            "清空聊天记录"共用同一份数据
+          </div>
+        </el-descriptions-item>
+        <el-descriptions-item label="向量库落盘">
+          <span class="mono">{{ status?.storage.vectorStoreFile }}</span>
+          <div class="hint">向量库运行期是内存态，重启时从这个文件载入（{{ status?.vectorStore }}）</div>
+        </el-descriptions-item>
+        <el-descriptions-item label="上传原件">
+          <span class="mono">{{ status?.storage.uploadDir }}</span>
         </el-descriptions-item>
         <el-descriptions-item label="文档 / 分块">
           {{ status?.documentCount }} 份 · {{ status?.chunkCount }} 片段
+          <span class="hint">全局计数，与身份无关</span>
         </el-descriptions-item>
         <el-descriptions-item label="长期记忆">
           {{ status?.memoryCount }} 条
           <span v-if="!status?.userIdentified" class="hint">（本次请求未带身份，故为 0）</span>
+          <span v-else class="hint">按当前身份统计（记忆按身份隔离）</span>
         </el-descriptions-item>
       </el-descriptions>
     </el-card>
