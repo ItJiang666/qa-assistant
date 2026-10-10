@@ -121,33 +121,11 @@ public class DocumentIngestService {
                 return;
             }
 
-            // ── [3][4] 分块 + 打标 ────────────────────────────────────
-            List<TextSegment> segments = split(text, doc);
-            if (segments.isEmpty()) {
-                markFailed(documentId, "分块后没有任何有效内容");
-                return;
-            }
+            // ── [3][4][5][6] 分块 + 向量化 + 入库 ─────────────────────
+            indexText(documentId, doc, text, "解析");
 
-            // ── [5] 批量向量化（一次调用，不要循环单条）──────────────
-            List<Embedding> embeddings = embeddingModel.embedAll(segments).content();
-            if (embeddings == null || embeddings.size() != segments.size()) {
-                markFailed(documentId, "向量化结果数量与分块数不一致");
-                return;
-            }
-
-            // ── [6] 入库 + 落盘 ───────────────────────────────────────
-            vectorStoreService.add(embeddings, segments);
-            documentMapper.markIndexed(documentId, segments.size());
-            // 把"这些向量到底是哪个模型生成的"写回数据库：
-            // 全量重建索引时会用当前模型重灌，若不同步这两列，界面与后续一致性检查都会基于旧模型名得出错误结论
-            String embeddingModelName = modelRegistry.embeddingModelName();
-            documentMapper.updateIndexIdentity(documentId, embeddingModelName,
-                    "qa_" + embeddingModelName.replaceAll("[^A-Za-z0-9]", "_"));
-            vectorStoreService.persist();
-
-            log.info("入库完成: id={}, file={}, 分块 {}，耗时 {} ms",
-                    documentId, doc.getFileName(), segments.size(),
-                    System.currentTimeMillis() - startMillis);
+            log.info("入库完成: id={}, file={}, 耗时 {} ms",
+                    documentId, doc.getFileName(), System.currentTimeMillis() - startMillis);
 
         } catch (BlankDocumentException ex) {
             // ★ 扫描版 PDF / 纯图片文档走的是这条路径，而不是上面的空值检查。
@@ -161,7 +139,7 @@ public class DocumentIngestService {
             //   这正是开发文档第 9 章「何时拆分 Python」决策树的第一个判断点，
             //   必须给出人能看懂的结论。
             markFailed(documentId, "解析结果为空。该文件可能是扫描版 PDF 或纯图片，"
-                    + "没有可提取的文字层（需要 OCR，本期不支持）");
+                    + "没有可提取的文字层（可用「识别文字」在本机 OCR 后入库）");
             log.warn("文档无文字层（疑似扫描件）: id={}, file={}", documentId, doc.getFileName());
 
         } catch (Exception ex) {
@@ -170,6 +148,47 @@ public class DocumentIngestService {
             log.error("入库失败: id={}, file={}", documentId, doc.getFileName(), ex);
             markFailed(documentId, shorten(ex.getClass().getSimpleName() + ": " + ex.getMessage()));
         }
+    }
+
+    /**
+     * 把一段<b>已经拿到的文本</b>分块、向量化并入库。
+     *
+     * <p>抽出来是因为现在有<b>两个来源</b>的文本要走同一条路：
+     * <ol>
+     *   <li>正常路径：Tika 从文件里解析出来的文字</li>
+     *   <li>OCR 路径：扫描件经本机 OCR 识别出来的文字（见 {@code OcrService}）</li>
+     * </ol>
+     * 两条路必须共用同一套分块、打标、向量化与落盘逻辑 ——
+     * 各写一份迟早会出现"OCR 入库的文档检索不到"这类只在一条路上复现的问题。
+     *
+     * @param documentId 文档 ID
+     * @param doc        文档实体
+     * @param text       待入库文本
+     * @param source     来源描述，仅用于日志（如"解析"/"OCR"）
+     * @throws IllegalArgumentException 分块为空或向量数量不匹配时抛出（由调用方落成失败原因）
+     */
+    public void indexText(Long documentId, Document doc, String text, String source) {
+        List<TextSegment> segments = split(text, doc);
+        if (segments.isEmpty()) {
+            throw new IllegalArgumentException("分块后没有任何有效内容");
+        }
+
+        // 批量向量化（一次调用，不要循环单条）
+        List<Embedding> embeddings = embeddingModel.embedAll(segments).content();
+        if (embeddings == null || embeddings.size() != segments.size()) {
+            throw new IllegalArgumentException("向量化结果数量与分块数不一致");
+        }
+
+        vectorStoreService.add(embeddings, segments);
+        documentMapper.markIndexed(documentId, segments.size());
+        // 把"这些向量到底是哪个模型生成的"写回数据库：
+        // 全量重建索引时会用当前模型重灌，若不同步这两列，界面与后续一致性检查都会基于旧模型名得出错误结论
+        String embeddingModelName = modelRegistry.embeddingModelName();
+        documentMapper.updateIndexIdentity(documentId, embeddingModelName,
+                "qa_" + embeddingModelName.replaceAll("[^A-Za-z0-9]", "_"));
+        vectorStoreService.persist();
+
+        log.info("{}文本入库完成: id={}, file={}, 分块 {}", source, documentId, doc.getFileName(), segments.size());
     }
 
     /**

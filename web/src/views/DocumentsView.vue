@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadRequestOptions } from 'element-plus'
-import { api, ApiError, type DocumentItem } from '../api/client'
+import { api, ApiError, type DocumentItem, type OcrAvailability, type OcrPreview } from '../api/client'
 
 const emit = defineEmits<{ (e: 'changed'): void }>()
 
@@ -12,6 +12,21 @@ const loading = ref(false)
 const uploading = ref(false)
 const reindexing = ref(false)
 let pollTimer: number | undefined
+
+// ── 本地 OCR（扫描件识别）────────────────────────────────────────────────
+/**
+ * 本机 OCR 能力。
+ *
+ * 单独查一次而不是跟着文档列表一起刷新：它是**进程级不变**的信息
+ * （本机装没装 Python/依赖），跟列表混在一起会让"文档变了"与"能力变了"
+ * 两件事纠缠，也让无谓的重复探测变多。
+ */
+const ocr = ref<OcrAvailability | null>(null)
+/** 正在识别的文档 ID（防止同一份被连点，也用于按钮 loading）。 */
+const ocrRunningId = ref<number | null>(null)
+/** 识别完成、等待用户确认的结果。 */
+const ocrPreview = ref<OcrPreview | null>(null)
+const ocrConfirming = ref(false)
 
 /** 入参状态 → 展示用标签色。FAILED 必须一眼可见，所以用 danger 而不是 info。 */
 function statusTag(status: DocumentItem['status']) {
@@ -30,6 +45,113 @@ function statusLabel(status: DocumentItem['status']) {
     case 'PENDING': return '排队中'
     default: return '失败'
   }
+}
+
+/**
+ * 这一行能不能点「识别文字」。
+ *
+ * 三个条件缺一不可：是 PDF（OCR 只对图像型文档有意义）、不在处理中
+ * （PENDING/PARSING 时文件还没落定）、且本机 OCR 可用。
+ * 已入库的文档也允许再识别？——不允许：重复识别同一份会把内容入库两遍，
+ * 而界面上没有办法区分这两份重复内容。想重来就先删除。
+ *
+ * 不可用时按钮**置灰而不是隐藏**：藏起来用户只会以为"这功能不存在"，
+ * 置灰配 tooltip 才能告诉他缺什么、怎么补。
+ */
+function canRecognize(row: DocumentItem): boolean {
+  return row.fileType === 'pdf'
+      && row.status !== 'INDEXED'
+      && row.status !== 'PARSING'
+      && row.status !== 'PENDING'
+      && ocr.value?.available === true
+}
+
+/** 识别按钮不可用时的原因（鼠标悬停可见）。 */
+function recognizeTooltip(row: DocumentItem): string {
+  if (row.fileType !== 'pdf') {
+    return '「识别文字」只对 PDF 有效：其它格式本来就带文字层，直接上传即可被解析'
+  }
+  if (row.status === 'INDEXED') {
+    return '该文档已入库；如需重新识别，请先删除再重新上传'
+  }
+  if (row.status === 'PARSING' || row.status === 'PENDING') {
+    return '正在处理中，请稍候'
+  }
+  if (!ocr.value?.available) {
+    return ocr.value?.hint || '本机 OCR 不可用'
+  }
+  return '在本机识别该扫描件的文字（不联网），识别完成后需要你确认才会入库'
+}
+
+async function loadOcrAvailability() {
+  try {
+    ocr.value = await api.ocrAvailability()
+  } catch {
+    // 探测失败不影响文档管理：只在界面上按"不可用"处理
+    ocr.value = null
+  }
+}
+
+/**
+ * 识别文字。
+ *
+ * ⚠️ 识别是**同步阻塞**的一次请求（50 页约 2 分钟），所以按钮必须给出
+ * 明确的进行中文案。没有进度感的等待，用户一定会以为卡死了然后去点第二次。
+ */
+async function handleRecognize(row: DocumentItem) {
+  if (ocrRunningId.value !== null) {
+    ElMessage.warning('已有识别任务在进行中，请稍候')
+    return
+  }
+  ocrRunningId.value = row.id
+  ElMessage.info(`正在本机识别《${row.fileName}》，${ocr.value?.maxPages ?? 50} 页以内约需 ${estimateHint()}，请稍候`)
+  try {
+    ocrPreview.value = await api.recognizeOcr(row.id)
+  } catch (e) {
+    const msg = e instanceof ApiError ? e.message : '识别失败'
+    ElMessage.error(msg)
+    // 依赖缺失这类问题可能是刚装好/刚卸载，重新探测一次让按钮状态跟上
+    await loadOcrAvailability()
+  } finally {
+    ocrRunningId.value = null
+  }
+}
+
+function estimateHint(): string {
+  return '1~3 分钟'
+}
+
+/** 确认入库。 */
+async function handleConfirmOcr() {
+  const preview = ocrPreview.value
+  if (!preview) {
+    return
+  }
+  ocrConfirming.value = true
+  try {
+    const result = await api.confirmOcr(preview.documentId)
+    ElMessage.success(`已入库，生成 ${result.chunkCount} 个分块`)
+    ocrPreview.value = null
+    await load()
+    emit('changed')
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e))
+  } finally {
+    ocrConfirming.value = false
+  }
+}
+
+/** 取消：明确告诉用户"什么都没发生"，避免他担心已经悄悄入库了。 */
+function handleCancelOcr() {
+  ocrPreview.value = null
+  ElMessage.info('已放弃本次识别结果，文档未被修改')
+}
+
+/** 预览文本的前若干字（后端已截断，这里再限一层显示高度）。 */
+const previewText = computed(() => ocrPreview.value?.preview ?? '')
+
+function confidenceText(value: number | null): string {
+  return value == null ? '—' : value.toFixed(3)
 }
 
 function formatSize(bytes: number): string {
@@ -116,7 +238,10 @@ async function handleReindex() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  void load()
+  void loadOcrAvailability()
+})
 onBeforeUnmount(() => {
   if (pollTimer !== undefined) {
     window.clearInterval(pollTimer)
@@ -186,13 +311,109 @@ onBeforeUnmount(() => {
             <span v-else class="muted">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="90" fixed="right">
+        <el-table-column label="操作" width="190" fixed="right">
           <template #default="{ row }">
+            <!--
+              按钮只在 PDF 行出现：对 txt/docx 这类本来就带文字层的格式，
+              一个永远置灰的按钮纯属视觉噪音，还会让人怀疑"是不是我这份文件有问题"。
+              不可用的原因（未装依赖/已入库/处理中）仍用 tooltip 说明。
+            -->
+            <el-tooltip
+                v-if="row.fileType === 'pdf'"
+                :content="recognizeTooltip(row)" placement="top" :show-after="300">
+              <span>
+                <el-button
+                    size="small" type="primary" text
+                    :disabled="!canRecognize(row)"
+                    :loading="ocrRunningId === row.id"
+                    @click="handleRecognize(row)">
+                  {{ ocrRunningId === row.id ? '识别中…' : '识别文字' }}
+                </el-button>
+              </span>
+            </el-tooltip>
             <el-button size="small" type="danger" text @click="handleDelete(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
+
+      <!--
+        OCR 能力说明。刻意用 el-alert 而不是自定义图标区：
+        全项目都用 el-alert 表达这类"需要读一眼"的提示，保持一致；
+        而且 @element-plus/icons-vue 并不是本项目的直接依赖（只是 element-plus
+        的传递依赖），为一个图标去依赖它，将来 element-plus 升级换实现就会断。
+      -->
+      <el-alert
+          v-if="ocr && !ocr.available"
+          type="info" :closable="false" show-icon class="ocr-alert">
+        <template #title>本机未启用扫描件文字识别（可选功能）</template>
+        <div class="ocr-alert-body">{{ ocr.hint }}</div>
+      </el-alert>
+      <el-alert
+          v-else-if="ocr && ocr.available"
+          type="success" :closable="false" show-icon class="ocr-alert">
+        <template #title>本机 OCR 可用（识别全程在本机完成，不联网）</template>
+        <div class="ocr-alert-body">
+          单次最多 {{ ocr.maxPages }} 页、超时 {{ ocr.timeout }}；
+          识别结果需你确认后才会入库。
+        </div>
+      </el-alert>
     </el-card>
+
+    <!--
+      识别结果确认对话框。
+      刻意做成"必须显式确认"：OCR 一定有错字，而错的文本一旦入库会被检索、被引用、
+      被模型当成依据 —— 收拾它比确认一次麻烦得多。
+    -->
+    <el-dialog
+        :model-value="ocrPreview !== null"
+        title="确认识别结果"
+        width="720px"
+        :close-on-click-modal="false"
+        @update:model-value="() => handleCancelOcr()">
+      <template v-if="ocrPreview">
+        <el-alert
+            v-if="ocrPreview.lowQuality"
+            type="warning" :closable="false" show-icon class="ocr-alert"
+            title="本次识别质量偏低，请务必核对后再入库" />
+
+        <el-descriptions :column="2" border size="small" class="ocr-desc">
+          <el-descriptions-item label="文件">{{ ocrPreview.fileName }}</el-descriptions-item>
+          <el-descriptions-item label="识别页数">
+            {{ ocrPreview.pagesWithText }} / {{ ocrPreview.totalPages }}
+            <span v-if="ocrPreview.pagesWithText < ocrPreview.totalPages" class="warn-text">
+              （有页面没识别出文字，可能漏内容）
+            </span>
+          </el-descriptions-item>
+          <el-descriptions-item label="识别字数">{{ ocrPreview.chars }}</el-descriptions-item>
+          <el-descriptions-item label="平均置信度">
+            {{ confidenceText(ocrPreview.avgConfidence) }}
+          </el-descriptions-item>
+          <el-descriptions-item label="引擎">
+            {{ ocrPreview.engine }} {{ ocrPreview.engineVersion }}
+          </el-descriptions-item>
+          <el-descriptions-item label="耗时">
+            {{ (ocrPreview.elapsedMs / 1000).toFixed(1) }} 秒
+          </el-descriptions-item>
+        </el-descriptions>
+
+        <div class="ocr-preview-title">
+          识别文本预览（前若干字，完整内容共 {{ ocrPreview.chars }} 字）
+        </div>
+        <pre class="ocr-preview">{{ previewText }}</pre>
+
+        <div class="ocr-tip">
+          确认后会把这批文本分块入库，并在文档列表里标注
+          <b>「正文来自本机 OCR 识别」</b> —— 它不是原件文字层，可能有错字。
+        </div>
+      </template>
+
+      <template #footer>
+        <el-button @click="handleCancelOcr">放弃，不入库</el-button>
+        <el-button type="primary" :loading="ocrConfirming" @click="handleConfirmOcr">
+          确认入库
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -245,5 +466,64 @@ onBeforeUnmount(() => {
 
 .muted {
   color: #c4c8ce;
+}
+
+/* ── 本地 OCR ─────────────────────────────────────────────────────────── */
+
+.ocr-alert {
+  margin-top: 12px;
+}
+
+/* hint 里含 pip 安装命令，会换行；保留换行并按需断开，避免命令被截断看不清 */
+.ocr-alert-body {
+  font-size: 12px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ocr-alert-body :deep(code) {
+  font-family: Consolas, "Courier New", monospace;
+}
+
+.ocr-desc {
+  margin-bottom: 12px;
+}
+
+.ocr-preview-title {
+  font-size: 13px;
+  color: #5b6068;
+  margin-bottom: 6px;
+}
+
+/*
+ * 预览框：固定高度 + 内部滚动。
+ * 识别文本可能几千字，让它把对话框顶出屏幕，用户就看不到底部的"确认入库"按钮了。
+ */
+.ocr-preview {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  background: #fafbfc;
+  border: 1px solid #eef0f3;
+  border-radius: 6px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ocr-tip {
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: #9aa0a6;
+}
+
+.warn-text {
+  color: #e6a23c;
+  font-size: 12px;
 }
 </style>

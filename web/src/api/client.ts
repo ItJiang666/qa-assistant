@@ -205,6 +205,40 @@ export interface DocumentItem {
   updatedAt: string
 }
 
+/** 本地 OCR 能力（只读展示用）。 */
+export interface OcrAvailability {
+  available: boolean
+  /** READY（可用）/ DISABLED（配置关闭）/ NO_PYTHON / NO_DEPENDENCY / NO_SCRIPT */
+  state: 'READY' | 'DISABLED' | 'NO_PYTHON' | 'NO_DEPENDENCY' | 'NO_SCRIPT'
+  maxPages: number
+  dpi: number
+  timeout: string
+  /** 不可用时给用户的下一步指引（含 pip 安装命令）；可用时为 null。 */
+  hint: string | null
+}
+
+/**
+ * OCR 识别预览（**尚未入库**）。
+ *
+ * `lowQuality` 由后端判定（平均置信度低于 0.85，或识别出文字的页数不足总页数 60%），
+ * 界面据此提示"务必核对后再入库" —— OCR 一定有错字，而漏页往往是静默的。
+ */
+export interface OcrPreview {
+  documentId: number
+  fileName: string
+  totalPages: number
+  pagesWithText: number
+  chars: number
+  avgConfidence: number | null
+  elapsedMs: number
+  lowQuality: boolean
+  engine: string
+  engineVersion: string
+  /** 预览在服务端的保留时长（秒），超时需重新识别。 */
+  expiresInSeconds: number
+  preview: string
+}
+
 export interface UploadResult {
   id: number
   fileName: string
@@ -299,6 +333,28 @@ export const api = {
   },
 
   deleteDocument: (id: number) => request<void>(`/api/v1/documents/${id}`, { method: 'DELETE' }),
+
+  /**
+   * 查询本机 OCR 能力。
+   *
+   * 注意它**不返回错误状态**：`available: false` 是正常答案（本机没装 Python 或依赖），
+   * 界面据此决定按钮是可用、置灰还是给一行 pip 命令。
+   */
+  ocrAvailability: () => request<OcrAvailability>('/api/v1/documents/ocr/availability'),
+
+  /**
+   * 识别扫描件的文字（**只返回预览，不入库**）。
+   *
+   * 入库要用户核对后调 `confirmOcr` —— OCR 一定有错字，错了的文本一旦入库会被检索、
+   * 被引用、被当成依据，收拾起来比确认一次麻烦得多。
+   */
+  recognizeOcr: (id: number) =>
+      request<OcrPreview>(`/api/v1/documents/${id}/ocr`, { method: 'POST' }),
+
+  /** 确认把识别结果入库。 */
+  confirmOcr: (id: number) =>
+      request<{ documentId: number; chunkCount: number }>(
+          `/api/v1/documents/${id}/ocr/confirm`, { method: 'POST' }),
 
   reindex: () => request<{ reindexed: number; embeddingModel: string }>(
       '/api/v1/documents/reindex', { method: 'POST' }),

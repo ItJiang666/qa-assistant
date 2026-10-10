@@ -101,6 +101,20 @@ public interface DocumentMapper {
     int markFailed(@Param("id") Long id, @Param("errorMessage") String errorMessage);
 
     /**
+     * 只写来源说明，<b>不改状态</b>。
+     *
+     * <p>给 OCR 用：文档正文是识别出来的，需要留痕告诉用户"这不是原件文字层"，
+     * 但它的状态必须保持 {@code INDEXED}（它确实已成功入库并能被检索）。
+     * 若用 {@link #markFailed} 写留痕，会把状态改成 FAILED，
+     * 造成"界面显示失败、而向量其实已在库里能被检索到"的自相矛盾状态。
+     *
+     * @param id   文档 ID
+     * @param note 来源说明
+     * @return 影响行数
+     */
+    int updateOriginNote(@Param("id") Long id, @Param("note") String note);
+
+    /**
      * 删除文档记录。
      *
      * @param id 文档 ID

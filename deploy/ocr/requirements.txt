@@ -1,0 +1,19 @@
+# 本地离线 OCR 的可选依赖（**主流程不需要**）
+#
+# 只有"扫描版 PDF 识别"这一项功能需要它们。不装的话，上传扫描件会得到
+# 一句明确提示（需要 OCR，本期不支持），其余功能完全不受影响。
+#
+# 安装：
+#     pip install -r deploy/ocr/requirements.txt
+#
+# 为什么是这两个：
+#   rapidocr    ONNX Runtime + PP-OCR 模型，**模型随 pip 包下发**（约 31 MB），
+#               不联网下载；纯 CPU 即可跑，中文识别质量优于 Tesseract。
+#               不用 PaddleOCR 原版：Paddle 3.x 在本项目实测会抛
+#               `NotImplementedError: ConvertPirAttribute2RuntimeAttribute not support`，
+#               版本适配上更容易出问题。
+#   pymupdf     把 PDF 逐页渲染成位图（纯本地，无外部命令依赖；不用 poppler/Ghostscript）
+#
+# 版本要求：Python 3.10+（已在 3.13.13 上实测通过）
+rapidocr>=3.0
+pymupdf>=1.24

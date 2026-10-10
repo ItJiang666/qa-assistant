@@ -45,6 +45,145 @@ public class QaProperties {
     private Local local = new Local();
     private Cloud cloud = new Cloud();
     private Debug debug = new Debug();
+    private Ocr ocr = new Ocr();
+
+    /**
+     * 本地离线 OCR（扫描版 PDF 识别）。
+     *
+     * <h2>为什么它是"可选增强"而不是又一个必需依赖</h2>
+     * <p>本项目的核心承诺之一是"复制粘贴就能跑"：装个 JDK + Ollama 就能用。
+     * OCR 要给 Python 生态（RapidOCR + PyMuPDF 约 32 MB），如果变成必需，
+     * 这个承诺就破了。所以设计成：<b>不装也能跑全部主流程</b>，
+     * 只有"扫描件入库"这一项需要它，且界面会给出明确的安装指引。
+     *
+     * <h2>为什么默认开启</h2>
+     * <p>{@code enabled} 的语义是"允许尝试"，不是"已就绪"：
+     * 真正能不能用由 {@code OcrEngine.availability()} 探测（找 Python → 找依赖）。
+     * 默认 true 让装了依赖的人开箱可用，没装的人只是看到一个置灰的按钮 + 一句安装提示。
+     */
+    public static class Ocr {
+
+        /** 是否允许尝试 OCR。关掉后界面直接置灰，不再探测。 */
+        private boolean enabled = true;
+
+        /**
+         * Python 解释器路径。
+         *
+         * <p>留空则自动探测：先 {@code python3}、再 {@code python}。
+         * 之所以要能显式指定：Windows 上常有多套 Python（venv、conda、Microsoft Store 版），
+         * 自动探测可能挑中一个没装依赖的，那时用户需要一个不用改代码的出口。
+         */
+        private String python = "";
+
+        /** OCR 脚本路径。留空则用 {@code deploy/ocr/qa_ocr.py}（相对工作目录）。 */
+        private String script = "";
+
+        /**
+         * 单次识别的页数上限。
+         *
+         * <p>实测单页约 2.4 s（A4@200DPI），50 页约 2 分钟 —— 这是"用户愿意等"的上限。
+         * 更重要的是：<b>必须在应用层挡</b>。若让 Python 因页数过多被 OOM 杀掉，
+         * Java 只能看到一个退出码，给不出"请减少页数"这种可照做的提示。
+         */
+        private int maxPages = 50;
+
+        /**
+         * 拆页渲染精度（DPI）。
+         *
+         * <p>200 是实测的平衡点：再低小字号容易糊（识别率下降），
+         * 再高只是线性变慢（300 DPI 的像素量是 200 的 2.25 倍）。
+         */
+        private int dpi = 200;
+
+        /** 低于此置信度的行直接丢弃 —— 错的内容比没有更危险（模型会当真）。 */
+        private double minConfidence = 0.5;
+
+        /**
+         * 单次识别超时，形如 {@code 3m} / {@code 180s}。
+         *
+         * <p>3 分钟：50 页 × 2.4 s ≈ 2 分钟，留出余量。
+         * 超时会<b>连进程树一起杀</b>，避免孤儿 Python 继续吃 CPU。
+         *
+         * <p>用字符串 + {@code DurationParser} 而不是 {@code java.time.Duration} 字段：
+         * 与本项目其它 timeout 配置（{@code qa.cloud.chat.timeout} 等）保持同一套写法，
+         * 避免同一个项目里出现两种时长绑定约定。
+         */
+        private String timeout = "3m";
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public String getPython() {
+            return python;
+        }
+
+        public void setPython(String python) {
+            this.python = python;
+        }
+
+        public String getScript() {
+            return script;
+        }
+
+        public void setScript(String script) {
+            this.script = script;
+        }
+
+        public int getMaxPages() {
+            return maxPages;
+        }
+
+        public void setMaxPages(int maxPages) {
+            this.maxPages = maxPages;
+        }
+
+        public int getDpi() {
+            return dpi;
+        }
+
+        public void setDpi(int dpi) {
+            this.dpi = dpi;
+        }
+
+        public double getMinConfidence() {
+            return minConfidence;
+        }
+
+        public void setMinConfidence(double minConfidence) {
+            this.minConfidence = minConfidence;
+        }
+
+        public String getTimeout() {
+            return timeout;
+        }
+
+        public void setTimeout(String timeout) {
+            this.timeout = timeout;
+        }
+    }
+
+    /**
+     * 取 OCR 配置。
+     *
+     * @return OCR 配置
+     */
+    public Ocr getOcr() {
+        return ocr;
+    }
+
+    /**
+     * 设置 OCR 配置。
+     *
+     * @param ocr OCR 配置
+     */
+    public void setOcr(Ocr ocr) {
+        this.ocr = ocr;
+    }
 
     /**
      * 排查用开关。

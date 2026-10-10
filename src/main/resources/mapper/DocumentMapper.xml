@@ -72,6 +72,20 @@
         WHERE id = #{id}
     </update>
 
+    <!--
+        只写来源说明，**不动 status**。
+
+        为什么不能复用 markFailed：那个方法会把 status 改成 FAILED，而
+        "OCR 文本已成功入库"的文档状态必须是 INDEXED —— 否则界面上会出现
+        "文档显示失败、但向量其实已经在库里、还能被检索到"这种自相矛盾的状态：
+        用户既不敢删（怕丢数据）也不敢用（怕数据不全）。
+    -->
+    <update id="updateOriginNote">
+        UPDATE qa_document
+        SET error_message = #{note}, updated_at = CURRENT_TIMESTAMP
+        WHERE id = #{id}
+    </update>
+
     <delete id="deleteById">
         DELETE FROM qa_document WHERE id = #{id}
     </delete>

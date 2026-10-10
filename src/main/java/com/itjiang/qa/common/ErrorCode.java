@@ -34,7 +34,7 @@ public enum ErrorCode {
     /** 文件超过大小上限。 */
     DOC_TOO_LARGE(1003, "文件超过大小限制", HttpStatus.PAYLOAD_TOO_LARGE),
     /** 解析结果为空文本。 */
-    DOC_PARSE_EMPTY(1004, "解析结果为空，可能是扫描版 PDF（需 OCR，本期不支持）", HttpStatus.UNPROCESSABLE_ENTITY),
+    DOC_PARSE_EMPTY(1004, "解析结果为空，可能是扫描版 PDF 或纯图片，没有可提取的文字层", HttpStatus.UNPROCESSABLE_ENTITY),
     /** 入库流水线失败。 */
     DOC_INGEST_FAILED(1005, "文档入库失败", HttpStatus.INTERNAL_SERVER_ERROR),
     /**
@@ -45,6 +45,26 @@ public enum ErrorCode {
      * HTTP 用 422：请求本身没错，是服务端的数据状态与当前配置不一致。
      */
     INDEX_MODEL_MISMATCH(1006, "向量索引与当前向量模型不匹配，请重建索引", HttpStatus.UNPROCESSABLE_ENTITY),
+
+    // ── OCR（扫描版 PDF 本地识别）────────────────────────────────────────────
+    /**
+     * 本机 OCR 不可用。
+     *
+     * <p>单独立码而不是并入"文档入库失败"：它<b>不是错误，而是能力缺失</b> ——
+     * 用户装一行 pip 就能解决，界面据此给出安装命令，而不是让他去查日志。
+     * HTTP 用 503：服务本身正常，是它依赖的本机能力不具备。
+     */
+    OCR_UNAVAILABLE(1007, "本机 OCR 不可用（未装 Python 或缺少依赖）", HttpStatus.SERVICE_UNAVAILABLE),
+    /** 文件页数超过 OCR 上限。 */
+    OCR_TOO_MANY_PAGES(1008, "文件页数超过 OCR 上限", HttpStatus.UNPROCESSABLE_ENTITY),
+    /** 识别结果为空。 */
+    OCR_EMPTY(1009, "未从该文件中识别出文字", HttpStatus.UNPROCESSABLE_ENTITY),
+    /** PDF 无法读取（损坏或加密）。 */
+    OCR_PDF_UNREADABLE(1010, "PDF 无法读取（可能已损坏或有密码）", HttpStatus.UNPROCESSABLE_ENTITY),
+    /** 识别超时。 */
+    OCR_TIMEOUT(1011, "OCR 识别超时", HttpStatus.GATEWAY_TIMEOUT),
+    /** 未预期的识别失败。 */
+    OCR_FAILED(1012, "OCR 识别失败", HttpStatus.INTERNAL_SERVER_ERROR),
 
     // ── 2xxx 问答 ───────────────────────────────────────────────────────────
     /** 问题为空。 */

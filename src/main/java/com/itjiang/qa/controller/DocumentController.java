@@ -21,7 +21,12 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
+import com.itjiang.qa.model.dto.OcrPreviewResponse;
+import com.itjiang.qa.ocr.OcrEngine;
+import com.itjiang.qa.service.OcrService;
+
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -38,15 +43,87 @@ public class DocumentController {
     private final VectorStoreService vectorStoreService;
     private final QaProperties properties;
     private final QueryExpander queryExpander;
+    private final OcrService ocrService;
 
     public DocumentController(DocumentService documentService,
                               VectorStoreService vectorStoreService,
                               QaProperties properties,
-                              QueryExpander queryExpander) {
+                              QueryExpander queryExpander,
+                              OcrService ocrService) {
         this.documentService = documentService;
         this.vectorStoreService = vectorStoreService;
         this.properties = properties;
         this.queryExpander = queryExpander;
+        this.ocrService = ocrService;
+    }
+
+    /**
+     * 本地 OCR 能力探测（前端据此决定按钮状态）。
+     *
+     * <p>单独一个接口而不是塞进文档列表：它是<b>进程级不变</b>的信息
+     * （本机装没装 Python/依赖），混进每次都变的列表里会让"文档列表变了"
+     * 与"OCR 能力变了"两件事纠缠在一起，前端也不好缓存。
+     *
+     * <p>不返回 200 之外的任何状态：<b>"不可用"不是错误</b>，而是一个正常答案，
+     * 前端要拿它来决定是给按钮、置灰、还是给一行 pip 安装命令。
+     *
+     * @return 可用性与给用户的下一步指引
+     */
+    @GetMapping("/ocr/availability")
+    public ApiResponse<Map<String, Object>> ocrAvailability() {
+        OcrEngine.Availability availability = ocrService.availability();
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("available", availability.usable());
+        data.put("state", availability.name());
+        data.put("maxPages", properties.getOcr().getMaxPages());
+        data.put("dpi", properties.getOcr().getDpi());
+        data.put("timeout", properties.getOcr().getTimeout());
+        data.put("hint", ocrUnavailableHint(availability));
+        return ApiResponse.ok(data);
+    }
+
+    /**
+     * 识别文字（扫描版 PDF）：**只返回预览，不入库**。
+     *
+     * <p>入库要等用户核对后调 {@code /ocr/confirm}。原因见 {@code OcrService} 的类注释。
+     *
+     * @param id 文档 ID
+     * @return 识别预览
+     */
+    @PostMapping("/{id}/ocr")
+    public ApiResponse<OcrPreviewResponse> recognize(@PathVariable("id") Long id) {
+        return ApiResponse.ok(ocrService.recognize(id));
+    }
+
+    /**
+     * 确认把识别出的文本入库。
+     *
+     * @param id 文档 ID
+     * @return 入库的分块数
+     */
+    @PostMapping("/{id}/ocr/confirm")
+    public ApiResponse<Map<String, Object>> confirmOcr(@PathVariable("id") Long id) {
+        int chunks = ocrService.confirm(id);
+        return ApiResponse.ok(Map.of("documentId", id, "chunkCount", chunks));
+    }
+
+    /**
+     * 把 OCR 不可用的原因翻成"下一步该做什么"。
+     *
+     * @param availability 可用性状态
+     * @return 指引文案；可用时返回 {@code null}
+     */
+    private String ocrUnavailableHint(OcrEngine.Availability availability) {
+        return switch (availability) {
+            case READY -> null;
+            case DISABLED -> "本地 OCR 已在配置中关闭（qa.ocr.enabled=false）。扫描件无法识别文字。";
+            case NO_PYTHON -> "未检测到 Python。扫描件识别需要本机安装 Python 3.10+；"
+                    + "不装也不影响其它功能，只是扫描件无法入库。";
+            case NO_DEPENDENCY -> "缺少 OCR 依赖，在本机执行一次即可：\n"
+                    + "pip install -r deploy/ocr/requirements.txt";
+            case NO_SCRIPT -> "找不到 deploy/ocr/qa_ocr.py。请从项目根目录启动应用"
+                    + "（脚本按当前工作目录解析）。";
+        };
     }
 
     /**
