@@ -169,7 +169,7 @@ python --version
 cd /d D:\qa-assistant
 ```
 
-把 `D:\qa-assistant` 换成你自己的解压路径。`cd /d` 里的 `/d` 不能漏：换盘符时必须加它。
+把 `D:\qa-assistant` 换成你自己的解压路径。如果解压路径在C盘，`cd /d` 里的 `/d` 可以省略：换盘符时必须加它。
 不确定当前在哪，先执行 `dir`，能看到 `start.cmd` 和 `deploy` 文件夹就对了。
 
 **第 3 步：安装依赖。**
