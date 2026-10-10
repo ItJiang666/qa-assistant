@@ -108,6 +108,26 @@ if exist ".env" (
     echo     复制 .env.example 为 .env，填入 Key，再重新运行本脚本。
 )
 
+rem ---------- 4.5) 云端模式预检 ----------
+rem 起因：QA_MODE=cloud 但缺 Key 时，应用会在装配期抛异常直接退出，
+rem 用户看到的是一大串 Spring bean 堆栈（实测：缺少 SILICONFLOW_API_KEY）。
+rem 这里提前判断，用一句话说清"缺什么、怎么办"，而不是让他去读堆栈。
+if /i "%QA_MODE%"=="cloud" (
+    set "CLOUD_OK=1"
+    echo %DEEPSEEK_API_KEY%| findstr /c:"sk-" >nul || set "CLOUD_OK="
+    echo %SILICONFLOW_API_KEY%| findstr /c:"sk-" >nul || set "CLOUD_OK="
+    if not defined CLOUD_OK (
+        echo.
+        echo [X] QA_MODE=cloud，但 .env 里缺少云端 Key，程序无法启动。
+        echo     云端模式需要两个 Key：对话 DEEPSEEK_API_KEY + 向量 SILICONFLOW_API_KEY。
+        echo     二选一：
+        echo       a^) 复制 .env.example 为 .env，把两个 Key 填上，再运行本脚本；
+        echo       b^) 改用本地模式：把 .env 里的 QA_MODE 设成 local（或这一行整行删掉，默认就是 local）。
+        goto :fail
+    )
+    echo [OK] 云端模式 Key 已配置
+)
+
 rem ---------- 5) 首次运行提示 ----------
 if "%OLLAMA_OK%"=="1" (
     echo.
@@ -118,9 +138,11 @@ if "%OLLAMA_OK%"=="1" (
     echo       ollama create qa-embed:4b -f deploy\ollama\Modelfile.qa-embed
     echo     漏掉最后一步的表现是"每一问都要等 7~10 秒"。
     echo.
-    echo [i] 要处理扫描版 PDF^(可选^)，还需要 Python 3.10+ 和一条命令：
-    echo       pip install -r deploy\ocr\requirements.txt
-    echo     不装不影响问答、上传、检索。
+    echo [i] 要处理扫描版 PDF^(可选^)，还需要 Python 3.10+ 和下面两步：
+    echo       cd /d "%~dp0"
+    echo       python -m pip install -r deploy\ocr\requirements.txt
+    echo     注意先在程序目录里执行^(这条命令用的是相对路径^)，这一步需要联网。
+    echo     装完刷新页面按钮才会亮；不装不影响问答、上传、检索。
 )
 
 echo.

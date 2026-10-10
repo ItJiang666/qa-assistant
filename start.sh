@@ -98,6 +98,31 @@ else
   echo "    cp .env.example .env 然后填入 Key，再重新运行本脚本。"
 fi
 
+# ---------- 4.5) 云端模式预检 ----------
+# 起因：QA_MODE=cloud 但缺 Key 时，应用会在装配期抛异常直接退出，
+# 用户看到的是一大串 Spring bean 堆栈（实测：缺少 SILICONFLOW_API_KEY）。
+# 这里提前判断，用一句话说清"缺什么、怎么办"。
+MODE_VALUE="${QA_MODE:-}"
+if [ -z "$MODE_VALUE" ] && [ -f .env ]; then
+  MODE_VALUE="$(grep -E '^[[:space:]]*QA_MODE=' .env | tail -n 1 | cut -d= -f2- | tr -d '[:space:]')"
+fi
+if [ "$MODE_VALUE" = "cloud" ]; then
+  CHAT_KEY="${DEEPSEEK_API_KEY:-}"
+  EMB_KEY="${SILICONFLOW_API_KEY:-}"
+  [ -z "$CHAT_KEY" ] && [ -f .env ] && CHAT_KEY="$(grep -E '^[[:space:]]*DEEPSEEK_API_KEY=' .env | tail -n 1 | cut -d= -f2- | tr -d '[:space:]')"
+  [ -z "$EMB_KEY" ] && [ -f .env ] && EMB_KEY="$(grep -E '^[[:space:]]*SILICONFLOW_API_KEY=' .env | tail -n 1 | cut -d= -f2- | tr -d '[:space:]')"
+  if [ -z "$CHAT_KEY" ] || [ -z "$EMB_KEY" ]; then
+    echo
+    echo "[X] QA_MODE=cloud，但缺少云端 Key，程序无法启动。"
+    echo "    云端模式需要两个 Key：对话 DEEPSEEK_API_KEY + 向量 SILICONFLOW_API_KEY。"
+    echo "    二选一："
+    echo "      a) cp .env.example .env，把两个 Key 填上，再运行本脚本；"
+    echo "      b) 改用本地模式：把 .env 里的 QA_MODE 设成 local（或删掉这一行，默认就是 local）。"
+    exit 1
+  fi
+  echo "[OK] 云端模式 Key 已配置"
+fi
+
 # ---------- 5) 首次运行提示 ----------
 if [ "$OLLAMA_OK" = "1" ]; then
   echo
@@ -108,9 +133,11 @@ if [ "$OLLAMA_OK" = "1" ]; then
   echo "      ollama create qa-embed:4b -f deploy/ollama/Modelfile.qa-embed"
   echo "    漏掉最后一步的表现是「每一问都要等 7~10 秒」。"
   echo
-  echo "[i] 要处理扫描版 PDF（可选），还需要 Python 3.10+ 和一条命令："
-  echo "      pip install -r deploy/ocr/requirements.txt"
-  echo "    不装不影响问答、上传、检索。"
+  echo "[i] 要处理扫描版 PDF（可选），还需要 Python 3.10+ 和下面两步："
+  echo "      cd \"\$(dirname \"\$0\")\""
+  echo "      python3 -m pip install -r deploy/ocr/requirements.txt"
+  echo "    注意先在程序目录里执行（这条命令用的是相对路径），这一步需要联网。"
+  echo "    装完刷新页面按钮才会亮；不装不影响问答、上传、检索。"
 fi
 
 echo
