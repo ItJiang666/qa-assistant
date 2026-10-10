@@ -44,6 +44,10 @@ package com.itjiang.qa.model.dto;
  * @param cloudReady         云端对话端点是否可用（base-url + 模型 + Key 齐备）
  * @param cloudBlockedReason 云端不可用的原因；可用时为 {@code null}
  * @param indexWarning       索引与当前向量模型不一致的提示；一致时为 {@code null}
+ * @param thinkingEnabled    云端对话是否开启"思考模式"（当前生效值）
+ * @param thinkingConfigured 配置里的思考模式默认值（重启后回到的那个值）
+ * @param thinkingOverridden 思考模式是否被运行时改过
+ * @param thinkingSwitchable 当前厂商预设是否声明了"怎么关思考"；未声明时界面不该给开关
  * @author Jiang
  */
 public record SystemStatusResponse(
@@ -70,6 +74,10 @@ public record SystemStatusResponse(
         boolean cloudReady,
         String cloudBlockedReason,
         String indexWarning,
+        boolean thinkingEnabled,
+        boolean thinkingConfigured,
+        boolean thinkingOverridden,
+        boolean thinkingSwitchable,
         RetrievalSettings retrieval
 ) {
 

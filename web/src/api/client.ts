@@ -103,6 +103,20 @@ export interface SystemStatus {
   cloudBlockedReason: string | null
   /** 索引与当前向量模型不一致的提示；一致时为 null。 */
   indexWarning: string | null
+  // ── P4 收尾：云端思考模式 ────────────────────────────────────────
+  /**
+   * 云端对话是否开启"思考模式"（当前生效值）。
+   *
+   * 它直接决定回答正确率：实测同一份 Prompt 下关思考会把资料里确实存在的答案
+   * 答成"未找到"（flash 3 次全错），开思考 3 次全对，代价是首字多约 1 秒。
+   */
+  thinkingEnabled: boolean
+  /** 配置里的默认值（重启后回到的那个值）。 */
+  thinkingConfigured: boolean
+  /** 是否被运行时改过（界面据此提示"重启后回到 X"）。 */
+  thinkingOverridden: boolean
+  /** 当前厂商预设是否声明了"怎么关思考"；为 false 时开关点了也没用，界面应置灰。 */
+  thinkingSwitchable: boolean
   /** 当前生效的检索与分块参数。 */
   retrieval: {
     topK: number
@@ -218,6 +232,18 @@ export const api = {
         body: JSON.stringify({ mode })
       }),
 
+  /**
+   * 切换云端"思考模式"，立即生效、无需刷新页面。
+   *
+   * 与对话模式不同：这里不需要 reload() —— 后端切换时只丢弃已装配的模型，
+   * 下一次提问按新设置重新装配；页面上的状态用返回值就地更新即可。
+   */
+  switchThinkingMode: (enabled: boolean) =>
+      request<SystemStatus>('/api/v1/system/thinking-mode', {
+        method: 'POST',
+        body: JSON.stringify({ enabled })
+      }),
+
   /** 云端连通性自检：不消耗生成额度，用于区分"Key 不对"与"网络不通"。 */
   cloudCheck: () => request<{ items: CloudCheckItem[] }>(
       '/api/v1/system/cloud-check', { method: 'POST' }),
@@ -248,10 +274,17 @@ export const api = {
 
   listMemories: () => request<{ total: number; items: MemoryItem[] }>('/api/v1/memories'),
 
-  createMemory: (content: string, importance?: number) =>
+  /**
+   * 手动新增一条长期记忆。
+   *
+   * memoryType 留空时由后端按措辞自动判定 —— 一律存成"结论"会让
+   * "每次回答都要…"这类要求完全不生效（注入语气是"可直接使用"，不是"必须遵守"）。
+   * 界面显式选择时会覆盖自动判定。
+   */
+  createMemory: (content: string, importance?: number, memoryType?: MemoryItem['memoryType']) =>
       request<MemoryItem>('/api/v1/memories', {
         method: 'POST',
-        body: JSON.stringify({ content, importance })
+        body: JSON.stringify({ content, importance, memoryType })
       }),
 
   updateMemory: (id: number, content?: string, importance?: number) =>

@@ -10,8 +10,11 @@ import { api, type CloudCheckItem, type CloudPreset, type SystemStatus } from '.
  * 模式在页头、模型名在弹窗、参数在 yml、Key 配没配只有启动日志知道。
  * 这一页把它收敛成三件事：**现在是什么状态、生效参数是多少、哪里不一致**。
  *
- * 刻意保持只读（除了两个明确的操作按钮：重建索引、连通性自检）：
+ * 刻意保持只读（除了三个明确的操作：重建索引、连通性自检、思考模式开关）：
  * 状态页改成"能改配置"的地方，就会变成一个难测试、难解释的配置编辑器。
+ * 允许"思考模式"破例，是因为它属于**每次提问都可能想调一次**的取舍
+ * （要准还是要快），而它又必须由后端持有状态（影响发给厂商的参数），
+ * 放回 yml 就意味着改一次重启一次。
  */
 const status = ref<SystemStatus | null>(null)
 const presets = ref<CloudPreset[]>([])
@@ -76,6 +79,32 @@ function canEmbed(preset: CloudPreset): boolean {
   return preset.embeddingModels.length > 0
 }
 
+/** 思考模式切换中（防连点：每点一次都会让后端丢弃已装配的模型）。 */
+const switchingThinking = ref(false)
+
+/**
+ * 切换云端思考模式。
+ *
+ * 用返回值就地更新状态，<b>不刷新页面</b>：与切换对话模式不同，
+ * 后端换思考参数只需丢弃模型实例，下次提问重建即可，刷新页面反而会把
+ * 当前会话的问答案例打断（会话 id 虽然持久化了，但正在生成的回答会丢）。
+ */
+async function toggleThinking(enabled: boolean) {
+  switchingThinking.value = true
+  try {
+    status.value = await api.switchThinkingMode(enabled)
+    ElMessage.success(enabled
+        ? '已开启思考：回答更准，首字会慢约 1 秒'
+        : '已关闭思考：首字更快，但复杂问题更容易答成"未找到"')
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e))
+    // 失败时回读真实状态，避免开关停在用户以为生效的位置上
+    await load()
+  } finally {
+    switchingThinking.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -117,6 +146,28 @@ onMounted(load)
             {{ status?.cloudReady ? '可用' : '不可用' }}
           </el-tag>
           <span v-if="!status?.cloudReady" class="hint">{{ status?.cloudBlockedReason }}</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="思考模式" :span="2">
+          <el-switch
+              :model-value="status?.thinkingEnabled"
+              :loading="switchingThinking"
+              :disabled="!status?.thinkingSwitchable"
+              active-text="开"
+              inactive-text="关"
+              inline-prompt
+              @change="(v: string | number | boolean) => toggleThinking(Boolean(v))" />
+          <span class="hint">
+            <template v-if="!status?.thinkingSwitchable">
+              当前厂商预设未声明"怎么关思考"，故此项不可切换
+            </template>
+            <template v-else>
+              开＝回答更准（实测同一份资料 3/3 对）但首字多约 1 秒；关＝更快，
+              但复杂问题更容易答成"未找到"（实测 0/3 对）。
+            </template>
+            <template v-if="status?.thinkingOverridden">
+              已被临时修改，重启后回到 {{ status?.thinkingConfigured ? '开' : '关' }}。
+            </template>
+          </span>
         </el-descriptions-item>
       </el-descriptions>
     </el-card>

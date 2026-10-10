@@ -58,12 +58,16 @@ public class MemoryController {
     /**
      * 手动新增一条记忆（前端「记住这条」）。
      *
+     * <p>{@code memoryType} 允许为空 —— 为空时由服务层按措辞自动判定（见
+     * {@link MemoryCreateRequest} 的类注释：一律存成结论会让"记了等于没记"）。
+     *
      * @param request 新增请求
      * @return 新建的记忆
      */
     @PostMapping
     public ApiResponse<MemoryDto> create(@Valid @RequestBody MemoryCreateRequest request) {
-        return ApiResponse.ok(memoryService.create(UserContext.get(), request.content(), request.importance()));
+        return ApiResponse.ok(memoryService.create(
+                UserContext.get(), request.content(), request.importance(), request.memoryType()));
     }
 
     /**

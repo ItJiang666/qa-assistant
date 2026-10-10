@@ -156,26 +156,64 @@ public class LongTermMemoryService {
      * @param importance 重要度，可为 {@code null}（默认 4，用户手动的通常更重要）
      * @return 新建的记忆
      */
-    public MemoryDto create(String userId, String content, Integer importance) {
+    public MemoryDto create(String userId, String content, Integer importance, String memoryType) {
         if (userId == null || userId.isBlank()) {
             throw new BusinessException(ErrorCode.PARAM_INVALID, "缺少 X-User-Id 请求头，无法归属这条记忆");
         }
         if (content == null || content.isBlank()) {
             throw new BusinessException(ErrorCode.PARAM_INVALID, "记忆内容不能为空");
         }
+        String trimmed = content.trim();
+        MemoryType type = resolveType(memoryType, trimmed);
 
         Memory entity = new Memory();
         entity.setUserId(userId);
-        entity.setMemoryType(MemoryType.CONCLUSION.getValue());
+        entity.setMemoryType(type.getValue());
         entity.setMemKey("manual_" + System.currentTimeMillis());
-        entity.setContent(content.trim());
+        entity.setContent(trimmed);
+        // 置信度直接给 1.0：用户亲口说的，不需要模型来评估可信度
         entity.setConfidence(BigDecimal.valueOf(1.00));
         entity.setImportance(importance == null ? 4 : Math.min(Math.max(importance, 1), 5));
         entity.setSourceConvId(null);
         memoryMapper.insert(entity);
 
-        log.info("手动新增记忆: userId={}, content={}", userId, content);
+        log.info("手动新增记忆: userId={}, type={}{}, content={}", userId, type.getValue(),
+                memoryType == null || memoryType.isBlank() ? "（自动判定）" : "", trimmed);
         return toDto(memoryMapper.selectById(userId, entity.getId()));
+    }
+
+    /**
+     * 自动判定为"偏好"的措辞线索。
+     *
+     * <p>判定从宽：宁可把一句陈述误判成偏好（注入语气强一点，最坏是多遵守一条无害要求），
+     * 也不要把一句指令误判成结论 —— 那会"记了等于没记"，是实测踩过的坑。
+     */
+    private static final List<String> PREFERENCE_HINTS = List.of(
+            "请", "务必", "必须", "不要", "别", "每次", "一律", "以后", "今后",
+            "尽量", "希望", "要求", "记住", "回答要", "答案要", "用中文", "简洁", "简短");
+
+    /**
+     * 决定这条记忆的类型。
+     *
+     * <p>显式传入时以传入为准；否则按措辞自动判定 —— 这一步是为了让<b>默认行为就是对的</b>：
+     * 实测"每次回答结束后加上一句（回答完毕）"被一律存成结论，而结论的注入措辞是
+     * "可直接使用"，模型根本不会照做。判错的代价是"记了等于没记"，所以宁可从宽。
+     *
+     * @param memoryType 显式类型，可为空
+     * @param content    记忆内容
+     * @return 最终类型
+     */
+    private MemoryType resolveType(String memoryType, String content) {
+        if (memoryType != null && !memoryType.isBlank()) {
+            return MemoryType.from(memoryType.trim());
+        }
+        // 祈使/长期行为类措辞 → 偏好（只有偏好会注入"请严格遵守"，也才会触发铁律第 5 条）
+        for (String hint : PREFERENCE_HINTS) {
+            if (content.contains(hint)) {
+                return MemoryType.PREFERENCE;
+            }
+        }
+        return MemoryType.CONCLUSION;
     }
 
     /**

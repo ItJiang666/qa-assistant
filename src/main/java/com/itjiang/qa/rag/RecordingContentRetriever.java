@@ -140,10 +140,46 @@ public class RecordingContentRetriever implements ContentRetriever {
                 : contents;
 
         LAST_RETRIEVAL.set(effective);
-        log.debug("检索完成: query='{}', 命中 {} 条{}",
-                query.text(), contents == null ? 0 : contents.size(),
-                (contents == null || contents.isEmpty()) ? "（已注入空资料占位符）" : "");
+        logRetrieval(query, contents, effective);
         return effective;
+    }
+
+    /**
+     * 把本次检索的"问题 → 命中列表（含分数与片段开头）"打成一条日志。
+     *
+     * <p>为什么值得单独写一个方法：检索是整条链路里最难从结果倒推的一步。
+     * 模型答"未找到"时，有三种完全不同的原因 —— 检索没命中、命中了但被阈值滤掉、
+     * 命中了也注入了但模型没用。只看模型输出无法区分它们，
+     * 而这条日志把第一种和第二种直接区分开了（分数就摆在那里）。
+     *
+     * <p>DEBUG 级：默认不打印，排查时临时把
+     * {@code logging.level.com.itjiang.qa.rag} 调到 DEBUG 即可。
+     *
+     * @param query     原始查询
+     * @param raw       底层检索的原始命中（可能为 {@code null}）
+     * @param effective 实际注入的内容（可能已被占位符替换）
+     */
+    private void logRetrieval(Query query, List<Content> raw, List<Content> effective) {
+        if (!log.isDebugEnabled()) {
+            return;
+        }
+        StringBuilder out = new StringBuilder();
+        out.append("检索明细: query='").append(query.text()).append('\'')
+                .append(", 生效 topK=").append(effectiveTopK())
+                .append(", minScore=").append(effectiveMinScore())
+                .append(", 原始命中=").append(raw == null ? 0 : raw.size())
+                .append(", 注入=").append(effective.size());
+        int index = 0;
+        for (Content content : effective) {
+            if (content.textSegment() == null) {
+                continue;
+            }
+            String text = content.textSegment().text();
+            out.append("\n  #").append(index++).append(' ')
+                    .append(isPlaceholder(content) ? "[占位符]" : "[资料]")
+                    .append(text.length() > 40 ? text.substring(0, 40).replace('\n', ' ') + "…" : text.replace('\n', ' '));
+        }
+        log.debug(out.toString());
     }
 
     /**
@@ -189,6 +225,16 @@ public class RecordingContentRetriever implements ContentRetriever {
     private int effectiveTopK() {
         Overrides overrides = OVERRIDES.get();
         return overrides == null || overrides.topK() == null ? defaultTopK : overrides.topK();
+    }
+
+    /**
+     * 取本次请求生效的 minScore（考虑了请求级覆盖）。
+     *
+     * @return 生效阈值
+     */
+    private double effectiveMinScore() {
+        Overrides overrides = OVERRIDES.get();
+        return overrides == null || overrides.minScore() == null ? defaultMinScore : overrides.minScore();
     }
 
     /**

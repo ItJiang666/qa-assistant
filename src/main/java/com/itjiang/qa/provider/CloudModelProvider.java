@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.Map;
+import java.util.function.BooleanSupplier;
 
 /**
  * 云端模型供应商：用 OpenAI 兼容协议接国内主流厂商（P4）。
@@ -54,16 +55,43 @@ public class CloudModelProvider implements ModelProvider {
     private final QaProperties properties;
     private final CloudEndpointResolver resolver;
 
+    /**
+     * 当前是否开启"思考模式"的取值来源。
+     *
+     * <p>做成 {@link BooleanSupplier} 而不是直接注入 {@code ThinkingModeService}：
+     * 模型装配在真正发起第一次请求时才发生，届时取到的必须是<b>那一刻</b>的开关值；
+     * 若在构造时读一次，之后用户切换开关，已建好的模型仍然按旧值发请求 ——
+     * 表现为"界面显示已切换，实际没生效"。
+     *
+     * <p>默认值取配置，便于单元测试直接 new 出实例验证装配逻辑。
+     * 注意<b>不能在字段初始化处读 {@code properties}</b> —— 那时构造器参数还没赋值。
+     */
+    private BooleanSupplier thinkingEnabled;
+
     public CloudModelProvider(QaProperties properties, CloudEndpointResolver resolver) {
         this.properties = properties;
         this.resolver = resolver;
+        this.thinkingEnabled = () -> properties.getCloud().getChat().isThinking();
+    }
+
+    /**
+     * 指定"思考模式"的取值来源。
+     *
+     * @param supplier 取值来源；{@code null} 时退回配置值
+     * @return 本实例（链式）
+     */
+    public CloudModelProvider thinkingEnabled(BooleanSupplier supplier) {
+        if (supplier != null) {
+            this.thinkingEnabled = supplier;
+        }
+        return this;
     }
 
     @Override
     public ChatModel chatModel() {
         CloudEndpointResolver.ResolvedEndpoint endpoint = resolver.chat();
         requireUsable(endpoint, "对话");
-        Map<String, Object> extra = resolver.chatExtraParameters();
+        Map<String, Object> extra = resolver.chatExtraParameters(thinkingEnabled.getAsBoolean());
         log.info("装配云端对话模型: {} @ {} (provider={}, temperature={}, maxTokens={}, 额外参数={})",
                 endpoint.model(), endpoint.baseUrl(), endpoint.providerId(),
                 QA_TEMPERATURE, properties.getCloud().getChat().getMaxOutputTokens(),
@@ -101,7 +129,7 @@ public class CloudModelProvider implements ModelProvider {
             // 个别厂商不支持该参数会返回 400，那时把 qa.cloud.chat.json-mode 设为 false 即可。
             builder.responseFormat(ResponseFormat.JSON);
         }
-        applyExtra(builder, resolver.chatExtraParameters());
+        applyExtra(builder, resolver.chatExtraParameters(thinkingEnabled.getAsBoolean()));
         return builder.build();
     }
 
@@ -109,7 +137,7 @@ public class CloudModelProvider implements ModelProvider {
     public StreamingChatModel streamingChatModel() {
         CloudEndpointResolver.ResolvedEndpoint endpoint = resolver.chat();
         requireUsable(endpoint, "流式对话");
-        Map<String, Object> extra = resolver.chatExtraParameters();
+        Map<String, Object> extra = resolver.chatExtraParameters(thinkingEnabled.getAsBoolean());
         log.info("装配云端流式模型: {} @ {} (额外参数={})", endpoint.model(), endpoint.baseUrl(),
                 extra.isEmpty() ? "无" : extra.keySet());
 

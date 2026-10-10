@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, type MemoryItem } from '../api/client'
+import { MEMORY_TYPE_OPTIONS, memoryTypeLabel, memoryTypeTag } from './memoryType'
 
 const emit = defineEmits<{ (e: 'changed'): void }>()
 
@@ -9,29 +10,14 @@ const memories = ref<MemoryItem[]>([])
 const loading = ref(false)
 const newContent = ref('')
 const newImportance = ref(4)
+
+/** 新增记忆的类型；空字符串表示"让后端自动判定"（见 memoryType.ts 的说明）。 */
+const newType = ref<MemoryItem['memoryType'] | ''>('')
 const adding = ref(false)
 
-/**
- * 记忆类型 → 展示。
- *
- * 三类记忆的用途不同，标签也分开：偏好影响回答方式，事实提供背景，结论可直接引用。
- * 用不同颜色是刻意的 —— 用户扫一眼就知道系统记住了什么性质的东西。
- */
-function typeTag(type: MemoryItem['memoryType']) {
-  switch (type) {
-    case 'PREFERENCE': return 'warning'
-    case 'FACT': return 'success'
-    default: return 'info'
-  }
-}
-
-function typeLabel(type: MemoryItem['memoryType']) {
-  switch (type) {
-    case 'PREFERENCE': return '偏好'
-    case 'FACT': return '事实'
-    default: return '结论'
-  }
-}
+const TYPE_OPTIONS = MEMORY_TYPE_OPTIONS
+const typeLabel = memoryTypeLabel
+const typeTag = memoryTypeTag
 
 async function load() {
   loading.value = true
@@ -53,8 +39,10 @@ async function handleAdd() {
   }
   adding.value = true
   try {
-    await api.createMemory(content, newImportance.value)
-    ElMessage.success('已记住')
+    const saved = await api.createMemory(content, newImportance.value, newType.value || undefined)
+    // 回显真实类型：自动判定选了什么，用户必须看得见，否则下次还是会怀疑"记了没生效"
+    ElMessage.success(
+        newType.value ? '已记住' : `已记住（自动判定为「${typeLabel(saved.memoryType)}」）`)
     newContent.value = ''
     await load()
     emit('changed')
@@ -129,8 +117,22 @@ onMounted(load)
             maxlength="500"
             show-word-limit
             @keydown.enter.prevent="handleAdd" />
+        <el-select v-model="newType" style="flex: 0 0 170px">
+          <el-option
+              v-for="opt in TYPE_OPTIONS"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value">
+            <span>{{ opt.label }}</span>
+            <span class="opt-hint">{{ opt.hint }}</span>
+          </el-option>
+        </el-select>
         <el-rate v-model="newImportance" :max="5" style="flex: 0 0 auto" />
         <el-button type="primary" :loading="adding" @click="handleAdd">记住</el-button>
+      </div>
+      <div class="add-hint">
+        写"每次…/请…/不要…"这类要求时，类型务必是<b>偏好</b> ——
+        只有偏好会在注入时写成"请严格遵守"，存成结论模型基本不会照做。
       </div>
     </el-card>
 
@@ -206,6 +208,21 @@ onMounted(load)
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.add-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #9aa0a6;
+}
+
+/* 下拉项里的补充说明；slot 内容在本组件编译，scoped 属性会带到选项节点上 */
+.opt-hint {
+  float: right;
+  margin-left: 16px;
+  font-size: 11px;
+  color: #9aa0a6;
 }
 
 .small {

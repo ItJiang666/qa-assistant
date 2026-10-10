@@ -4,6 +4,7 @@ import com.itjiang.qa.provider.CloudEndpointResolver;
 import com.itjiang.qa.provider.CloudModelProvider;
 import com.itjiang.qa.provider.LocalModelProvider;
 import com.itjiang.qa.provider.RuntimeModelRegistry;
+import com.itjiang.qa.service.ThinkingModeService;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.embedding.EmbeddingModel;
@@ -54,13 +55,20 @@ public class ModelConfig {
      * 模型实例是懒建的（见 {@code RuntimeModelRegistry}），
      * 因此没配 Key 的机器照样能用本地模式正常启动。
      *
-     * @param properties 应用配置
-     * @param resolver   云端端点解析器
+     * <p>这里把"思考模式"的取值来源接上运行时开关（{@code ThinkingModeService}）：
+     * 模型是懒建的，装配时读到的必须是那一刻的值 —— 否则界面上切换了开关，
+     * 已建好的模型仍按旧值发请求，表现为"切了没生效"。
+     *
+     * @param properties   应用配置
+     * @param resolver     云端端点解析器
+     * @param thinkingMode 思考模式开关
      * @return 云端模型供应商
      */
     @Bean
-    public CloudModelProvider cloudModelProvider(QaProperties properties, CloudEndpointResolver resolver) {
-        return new CloudModelProvider(properties, resolver);
+    public CloudModelProvider cloudModelProvider(QaProperties properties,
+                                                CloudEndpointResolver resolver,
+                                                ThinkingModeService thinkingMode) {
+        return new CloudModelProvider(properties, resolver).thinkingEnabled(thinkingMode::current);
     }
 
     /**

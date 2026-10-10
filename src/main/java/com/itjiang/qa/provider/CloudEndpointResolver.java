@@ -45,19 +45,26 @@ public class CloudEndpointResolver {
      *
      * <p>合并顺序（后者覆盖前者）：
      * <ol>
-     *   <li><b>预设的"关思考"参数</b> —— 仅当 {@code qa.cloud.chat.thinking=false}。
-     *       关掉思考对本项目是默认且必要的：DeepSeek 当前模型默认开启思考，
-     *       而本地实测思考模式要慢 16.5 倍（决策 22）</li>
+     *   <li><b>预设的"关思考"参数</b> —— 仅当 {@code thinkingEnabled} 为 {@code false}。
+     *       具体参数名由厂商预设的 {@code thinking-off-params} 描述
+     *       （DeepSeek 是 {@code thinking: {type: disabled}}，通义系是
+     *       {@code enable_thinking: false}），代码里不写死</li>
      *   <li><b>用户显式配置的 custom-parameters</b> —— 永远最后合并，
      *       这样"厂商上了新参数"或"预设写错了"都能在不改代码的前提下纠正</li>
      * </ol>
      *
+     * <p><b>为什么思考开关是入参而不是直接读配置</b>：它可以在运行时切换
+     * （见 {@code ThinkingModeService}），而本类是单例解析器。
+     * 取值由调用方（{@code CloudModelProvider}）从服务里取当前生效值传进来 ——
+     * 这样"配置默认"与"本次运行覆盖"哪个生效只有一处判断。
+     *
+     * @param thinkingEnabled 本次装配是否开启思考
      * @return 待合并进请求体的参数；无则为空 Map
      */
-    public Map<String, Object> chatExtraParameters() {
+    public Map<String, Object> chatExtraParameters(boolean thinkingEnabled) {
         QaProperties.Cloud.Chat cfg = properties.getCloud().getChat();
         Map<String, Object> params = new LinkedHashMap<>();
-        if (!cfg.isThinking()) {
+        if (!thinkingEnabled) {
             QaProperties.Cloud.Preset preset = preset(cfg.getProvider());
             if (preset != null) {
                 params.putAll(preset.getThinkingOffParams());
@@ -67,6 +74,32 @@ public class CloudEndpointResolver {
             params.putAll(cfg.getCustomParameters());
         }
         return params;
+    }
+
+    /**
+     * 按配置值组装额外参数（配置默认的思考开关）。
+     *
+     * <p>保留这个重载是给"只想知道配置会怎么发"的场景用的（例如连通性自检的说明文案），
+     * 真正装配模型必须走 {@link #chatExtraParameters(boolean)} 用运行时值。
+     *
+     * @return 待合并进请求体的参数；无则为空 Map
+     */
+    public Map<String, Object> chatExtraParameters() {
+        return chatExtraParameters(properties.getCloud().getChat().isThinking());
+    }
+
+    /**
+     * 当前配置的厂商预设是否声明了"怎么关思考"。
+     *
+     * <p>界面据此决定要不要显示思考开关：预设没声明时，关思考参数是空的，
+     * 开关点了也不会有任何效果 —— 给一个无效开关比不给更糟。
+     *
+     * @return 声明了返回 {@code true}
+     */
+    public boolean thinkingSwitchSupported() {
+        QaProperties.Cloud.Preset preset = preset(properties.getCloud().getChat().getProvider());
+        return preset != null && preset.getThinkingOffParams() != null
+                && !preset.getThinkingOffParams().isEmpty();
     }
 
     /**

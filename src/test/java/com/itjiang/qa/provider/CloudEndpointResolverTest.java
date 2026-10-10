@@ -166,4 +166,48 @@ class CloudEndpointResolverTest {
         // 整个视图里不该出现密钥本身
         assertThat(views.toString()).doesNotContain("sk-secret-value");
     }
+
+    @Test
+    @DisplayName("思考开关：关时才合并预设的关思考参数，开时必须一个都不发")
+    void chatExtraParametersShouldFollowThinkingFlag() {
+        QaProperties properties = properties();
+        properties.getCloud().getChat().setProvider("deepseek");
+        QaProperties.Cloud.Preset preset = properties.getCloud().getPresets().get("deepseek");
+        preset.setThinkingOffParams(Map.of("thinking", Map.of("type", "disabled")));
+        CloudEndpointResolver resolver = resolver(properties);
+
+        // 关思考：带上厂商特有的关思考参数
+        Map<String, Object> off = resolver.chatExtraParameters(false);
+        assertThat(off).containsKey("thinking");
+
+        // 开思考：必须一个额外参数都没有 —— 残留参数会让"开"这件事变成假的
+        assertThat(resolver.chatExtraParameters(true)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("用户显式 custom-parameters 永远最后合并（能纠正预设写错）")
+    void customParametersShouldWinOverPreset() {
+        QaProperties properties = properties();
+        QaProperties.Cloud.Preset preset = properties.getCloud().getPresets().get("deepseek");
+        preset.setThinkingOffParams(Map.of("thinking", Map.of("type", "disabled")));
+        properties.getCloud().getChat().setCustomParameters(Map.of("thinking", Map.of("type", "enabled")));
+
+        Map<String, Object> params = resolver(properties).chatExtraParameters(false);
+
+        assertThat(params.get("thinking")).isEqualTo(Map.of("type", "enabled"));
+    }
+
+    @Test
+    @DisplayName("预设没声明关思考参数时，界面不该给开关（thinkingSwitchSupported=false）")
+    void thinkingSwitchSupportDependsOnPreset() {
+        QaProperties properties = properties();
+        CloudEndpointResolver resolver = resolver(properties);
+
+        // 构造数据里两家预设都没声明 thinking-off-params
+        assertThat(resolver.thinkingSwitchSupported()).isFalse();
+
+        properties.getCloud().getPresets().get("deepseek")
+                .setThinkingOffParams(Map.of("thinking", Map.of("type", "disabled")));
+        assertThat(resolver.thinkingSwitchSupported()).isTrue();
+    }
 }

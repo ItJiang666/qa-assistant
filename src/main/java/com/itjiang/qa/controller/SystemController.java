@@ -4,10 +4,12 @@ import com.itjiang.qa.common.ApiResponse;
 import com.itjiang.qa.model.dto.ChatModeRequest;
 import com.itjiang.qa.model.dto.CloudCheckResponse;
 import com.itjiang.qa.model.dto.SystemStatusResponse;
+import com.itjiang.qa.model.dto.ThinkingModeRequest;
 import com.itjiang.qa.provider.CloudEndpointResolver;
 import com.itjiang.qa.service.CloudConnectivityService;
 import com.itjiang.qa.service.RuntimeModeService;
 import com.itjiang.qa.service.SystemStatusService;
+import com.itjiang.qa.service.ThinkingModeService;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -31,15 +33,18 @@ public class SystemController {
 
     private final SystemStatusService systemStatusService;
     private final RuntimeModeService runtimeModeService;
+    private final ThinkingModeService thinkingModeService;
     private final CloudConnectivityService connectivityService;
     private final CloudEndpointResolver cloudEndpointResolver;
 
     public SystemController(SystemStatusService systemStatusService,
                             RuntimeModeService runtimeModeService,
+                            ThinkingModeService thinkingModeService,
                             CloudConnectivityService connectivityService,
                             CloudEndpointResolver cloudEndpointResolver) {
         this.systemStatusService = systemStatusService;
         this.runtimeModeService = runtimeModeService;
+        this.thinkingModeService = thinkingModeService;
         this.connectivityService = connectivityService;
         this.cloudEndpointResolver = cloudEndpointResolver;
     }
@@ -72,6 +77,30 @@ public class SystemController {
     @PostMapping("/chat-mode")
     public ApiResponse<SystemStatusResponse> switchChatMode(@RequestBody @Valid ChatModeRequest request) {
         runtimeModeService.switchTo(RuntimeModeService.Mode.from(request.mode()));
+        return ApiResponse.ok(systemStatusService.currentStatus());
+    }
+
+    /**
+     * 切换云端"思考模式"，立即生效、无需重启。
+     *
+     * <p><b>为什么必须给这个开关</b>：思考模式对本项目是<b>正确率与延迟的直接取舍</b>，
+     * 而且取舍结果随问题难度变化 —— 实测同一份 Prompt 下"关思考"会把资料里
+     * 确实存在的答案答成"未找到"（3 次全错），"开思考"则 3 次全对，
+     * 代价是首字多约 1 秒。把选择权交给用户，比替他定死更合理。
+     *
+     * <p>与对话模式一样是<b>本次运行内有效</b>：重启后回到
+     * {@code qa.cloud.chat.thinking} 的配置值，界面必须写明这一点。
+     *
+     * <p>切换会丢弃已装配的对话类模型（额外参数固定在实例上，不丢就不生效）。
+     * 下一次提问时才重建，因此本接口自身很快。
+     *
+     * @param request 目标值
+     * @return 切换后的系统状态
+     */
+    @PostMapping("/thinking-mode")
+    public ApiResponse<SystemStatusResponse> switchThinkingMode(
+            @RequestBody @Valid ThinkingModeRequest request) {
+        thinkingModeService.switchTo(Boolean.TRUE.equals(request.enabled()));
         return ApiResponse.ok(systemStatusService.currentStatus());
     }
 

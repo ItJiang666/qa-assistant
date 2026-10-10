@@ -38,6 +38,7 @@ public class SystemStatusService {
     private final RuntimeModelRegistry modelRegistry;
     private final RuntimeModeService modeService;
     private final CloudEndpointResolver cloudResolver;
+    private final ThinkingModeService thinkingMode;
 
     public SystemStatusService(QaProperties properties,
                                DocumentMapper documentMapper,
@@ -45,7 +46,8 @@ public class SystemStatusService {
                                Environment environment,
                                RuntimeModelRegistry modelRegistry,
                                RuntimeModeService modeService,
-                               CloudEndpointResolver cloudResolver) {
+                               CloudEndpointResolver cloudResolver,
+                               ThinkingModeService thinkingMode) {
         this.properties = properties;
         this.documentMapper = documentMapper;
         this.jdbcTemplate = jdbcTemplate;
@@ -53,6 +55,7 @@ public class SystemStatusService {
         this.modelRegistry = modelRegistry;
         this.modeService = modeService;
         this.cloudResolver = cloudResolver;
+        this.thinkingMode = thinkingMode;
     }
 
     /**
@@ -93,6 +96,10 @@ public class SystemStatusService {
                 chatEndpoint.usable(),
                 chatEndpoint.usable() ? null : chatEndpoint.missingHint() + "（补到 .env 或环境变量后重启应用）",
                 indexWarning(),
+                thinkingMode.current(),
+                thinkingMode.configured(),
+                thinkingMode.overridden(),
+                cloudResolver.thinkingSwitchSupported(),
                 new SystemStatusResponse.RetrievalSettings(
                         properties.getRetrieval().getTopK(),
                         properties.getRetrieval().getMinScore(),
