@@ -332,6 +332,13 @@ onMounted(load)
 .system-page {
   display: flex;
   flex-direction: column;
+  /*
+   * 这一页卡片多、内容最长，是"整页被撑高"的重灾区：
+   * 外壳锁死视口后，滚动必须落在它自己身上，否则底部的卡片永远看不到。
+   */
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .block {

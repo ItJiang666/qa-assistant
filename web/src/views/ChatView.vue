@@ -101,7 +101,8 @@ async function openConversation(id: string) {
       role: m.role === 'user' ? 'user' : 'assistant',
       content: m.content
     }))
-    await scrollToBottom()
+    // 用户主动点开会话：强制到底，他要看的就是最新那一轮
+    await scrollToBottom(true)
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : String(e))
   }
@@ -146,11 +147,40 @@ async function handleDelete(id: string) {
   }
 }
 
-async function scrollToBottom() {
+/**
+ * 消息区当前是否"贴着底部"。
+ *
+ * <h2>为什么必须记这个状态</h2>
+ * 外壳锁死视口高度之后，消息区是<b>唯一</b>可滚动的地方。此时如果每次增量都无条件
+ * 把 scrollTop 顶到底，会出现一个很难受的体验：用户往上翻去读刚生成的中间段落，
+ * 下一个 delta 到达就把他拽回底部 —— 长回答基本没法读。
+ * 所以只在"用户原本就在底部"时才继续跟随。
+ */
+let stickToBottom = true
+
+/** 距底部多少像素以内算"还在底部"（留一点余量，避免像素级抖动就把跟随关掉）。 */
+const STICK_THRESHOLD_PX = 48
+
+function onBubblesScroll() {
+  const el = listRef.value
+  if (!el) {
+    return
+  }
+  stickToBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_THRESHOLD_PX
+}
+
+/**
+ * 滚到底部。
+ *
+ * @param force 忽略"是否贴底"，强制滚到底 —— 用户主动发问、切换会话时用，
+ *              因为那两种情况用户明确期望看到最新内容
+ */
+async function scrollToBottom(force = false) {
   await nextTick()
   const el = listRef.value
-  if (el) {
+  if (el && (force || stickToBottom)) {
     el.scrollTop = el.scrollHeight
+    stickToBottom = true
   }
 }
 
@@ -196,7 +226,8 @@ async function send() {
   // 若攥着 push 进去的那个原始对象改，set 不会触发依赖通知，
   // 界面就只在最后被别的事件顺带刷新一次 —— 表现为"没有流式输出"。
   const answer = bubbles.value[bubbles.value.length - 1]
-  await scrollToBottom()
+  // 用户刚发出提问：无论此前滚到哪里，都强制拉到底并恢复跟随
+  await scrollToBottom(true)
 
   try {
     await chatStream(text, currentId.value, {
@@ -271,7 +302,8 @@ async function restoreLastConversation() {
       role: m.role === 'user' ? 'user' : 'assistant',
       content: m.content
     }))
-    await scrollToBottom()
+    // 刷新/切模型后恢复会话：同样强制到底，让用户一眼看到最近的往来
+    await scrollToBottom(true)
   } catch {
     // 拉历史失败不阻断提问：给出提示，让用户自己决定是否新开对话
     ElMessage.warning('未能恢复上次会话的历史消息，可以直接继续提问')
@@ -364,7 +396,8 @@ onMounted(async () => {
     </el-card>
 
     <el-card shadow="never" class="main">
-      <div ref="listRef" class="bubbles">
+      <!-- 监听滚动以判断"用户是否还在底部"，决定流式输出要不要继续跟随 -->
+      <div ref="listRef" class="bubbles" @scroll.passive="onBubblesScroll">
         <el-empty
             v-if="bubbles.length === 0"
             description="提问试试 —— 回答只依据你上传的文档，资料里没有就会如实说找不到"
@@ -454,7 +487,17 @@ onMounted(async () => {
 .chat-layout {
   display: flex;
   gap: 14px;
-  height: calc(100vh - 100px);
+  /*
+   * 高度由父容器分配，不再用 calc(100vh - 100px) 猜。
+   *
+   * 原来那 100px 是按"页头 56 + 一点余量"估的，而实际占掉的是
+   * 页头 56px + el-main 上下各 18px 内边距 + 卡片自身内边距 —— 加起来超过 100px，
+   * 于是整页比视口高出一截，输入框落在屏幕外，必须先下滑才能打字。
+   * 估高度这件事总会随界面微调而失效（改个内边距就又对不上），
+   * 所以改成"父容器给多少就用多少"：外壳锁死视口高度，这里 flex:1 自适应。
+   */
+  flex: 1;
+  min-height: 0;
 }
 
 .side {
@@ -462,6 +505,7 @@ onMounted(async () => {
   flex: 0 0 230px;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
 .side :deep(.el-card__body) {
@@ -511,6 +555,7 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
 }
 
 .main :deep(.el-card__body) {
@@ -518,11 +563,15 @@ onMounted(async () => {
   flex-direction: column;
   height: 100%;
   padding: 0;
+  /* 同 .app-main > *：flex 里的滚动容器必须归零 min-height，否则内部滚动不生效 */
+  min-height: 0;
 }
 
 .bubbles {
   flex: 1;
-  overflow: auto;
+  /* 归零之后这个 overflow 才真正生效：消息多时只有消息区滚动，输入框不动 */
+  min-height: 0;
+  overflow-y: auto;
   padding: 16px;
 }
 
@@ -668,5 +717,7 @@ onMounted(async () => {
   padding: 12px 16px;
   border-top: 1px solid #e3e6eb;
   background: #fff;
+  /* 输入区永不被压缩：它是这块区域里唯一必须始终可见的部件 */
+  flex-shrink: 0;
 }
 </style>

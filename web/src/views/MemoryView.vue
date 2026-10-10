@@ -187,6 +187,19 @@ onMounted(load)
 </template>
 
 <style scoped>
+/*
+ * 页面自身滚动，外壳不滚。
+ *
+ * 外壳（App.vue 的 .app-shell）锁死了视口高度，所以滚动必须落在某一个元素上：
+ * 给根元素 height:100% + overflow-y:auto，记忆条数多时只有这一块滚，
+ * 页头与左侧菜单保持不动。min-height:0 是 flex 子项能真正滚动的前提。
+ */
+.page {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .card-header {
   display: flex;
   align-items: center;

@@ -218,7 +218,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <el-container style="height: 100%">
+  <el-container class="app-shell" style="height: 100%">
     <el-header height="56px" class="app-header">
       <div class="brand">
         <span class="logo">QA</span>
@@ -295,20 +295,21 @@ onBeforeUnmount(() => {
           左下角写清楚"东西都存在哪"。此前只显示"库类型 + 数据目录"，
           用户看完仍会问三个问题：长期记忆在哪、对话在哪、向量在哪。
           事实是前两者在同一个文件库（表 qa_memory / qa_message），
-          向量库是内存态 + 落盘文件，所以直接把三个路径列出来。
+          向量库是内存态 + 落盘文件。
+
+          这里只写相对路径、完整路径放 tooltip：侧栏只有 200px 宽，
+          写全路径会被折成三四行，比不写还难读。
         -->
         <div v-if="status" class="footer-note">
-          <div class="footer-line" :title="status.storage.dataDirSource">
-            数据库 <span class="mono">{{ status.database }}</span>
-          </div>
+          <div class="footer-line">库 <span class="mono">{{ status.database }}</span></div>
           <div class="footer-line" :title="`长期记忆与会话消息都在这个文件里：\n${status.storage.databaseFile}`">
-            长期记忆 + 对话 → <span class="mono">data\qa.mv.db</span>
+            记忆+对话 → <span class="mono">data/qa.mv.db</span>
           </div>
           <div class="footer-line" :title="`向量库为内存态，重启从这个文件载入：\n${status.storage.vectorStoreFile}`">
-            向量库 → <span class="mono">index\embedding-store.json</span>
+            向量 → <span class="mono">index/embedding-store.json</span>
           </div>
           <div class="footer-line" :title="`上传原件目录：\n${status.storage.uploadDir}`">
-            上传原件 → <span class="mono">uploads\</span>
+            原件 → <span class="mono">uploads/</span>
           </div>
           <div class="footer-line mono footer-dir" :title="status.dataDir">
             {{ status.dataDir }}
@@ -336,10 +337,17 @@ onBeforeUnmount(() => {
             class="main-alert"
             title="云端模式：你的问题与检索到的文档片段会发送给云端模型服务商，请勿提问敏感内容" />
 
-        <DocumentsView v-if="activeTab === 'documents'" @changed="loadStatus" />
-        <ChatView v-else-if="activeTab === 'chat'" @changed="loadStatus" />
-        <MemoryView v-else-if="activeTab === 'memories'" @changed="loadStatus" />
-        <SystemView v-else />
+        <!--
+          view-host 是给页面提供"确定高度"的那一层。
+          没有它，ChatView 的 flex:1 找不到 flex 父容器，就只能退回"按内容撑高"，
+          输入框又会被顶出去 —— 这正是这次要修的病根。
+        -->
+        <div class="view-host">
+          <DocumentsView v-if="activeTab === 'documents'" @changed="loadStatus" />
+          <ChatView v-else-if="activeTab === 'chat'" @changed="loadStatus" />
+          <MemoryView v-else-if="activeTab === 'memories'" @changed="loadStatus" />
+          <SystemView v-else />
+        </div>
       </el-main>
     </el-container>
 
@@ -466,6 +474,8 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
+  /* 页脚信息较长时让侧栏自己滚，不要把整个页面撑长 */
+  overflow: auto;
 }
 
 .footer-note {
@@ -495,13 +505,51 @@ onBeforeUnmount(() => {
   border-radius: 0;
 }
 
+/*
+ * 应用外壳不滚动，滚动交给各页自己。
+ *
+ * 原先 el-main 是 overflow:auto，页面可以整体上下滚 —— 于是"输入框被顶到屏幕外、
+ * 得先下滑才能打字"成了必然：任何一处内容变高（引用来源展开、提示条出现、
+ * 侧栏页脚行数变化）都会把整页推长。锁死外壳高度之后，页头、提示条占多少，
+ * 中间区域就自动少多少，输入框永远贴在可见区域的底部。
+ */
+.app-shell {
+  overflow: hidden;
+}
+
 .app-main {
   padding: 18px;
-  overflow: auto;
+  overflow: hidden;
+  /* 让 .view-host 用 flex:1 拿到"页头与提示条之外的全部高度" */
+  display: flex;
+  flex-direction: column;
+}
+
+/*
+ * flex 布局里滚动容器的必备项：默认 min-height:auto 会让"内容多高它就多高"，
+ * overflow 永远不会生效，于是它反过来把父容器撑出屏幕。必须显式归零。
+ */
+.app-main > * {
+  min-height: 0;
+}
+
+/*
+ * 页面宿主：占满 el-main 的剩余高度，并把"确定的高度"传给页面根元素。
+ *
+ * 各页面的根元素（.page / .system-page / .chat-layout）都靠它拿到高度：
+ * 要么 flex:1 撑开，要么 height:100% 填满 —— 两者都以父容器有确定高度为前提。
+ */
+.view-host {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .main-alert {
   margin-bottom: 12px;
+  /* 提示条保持自身高度，不被压缩：它是要被读的，压扁了等于没提示 */
+  flex-shrink: 0;
 }
 
 .alert-detail {
