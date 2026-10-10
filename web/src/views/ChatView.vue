@@ -33,6 +33,14 @@ interface Bubble {
   sources?: Source[]
   streaming?: boolean
   elapsedMs?: number
+  /**
+   * 引用来源是否展开。
+   *
+   * 默认收起：一次提问会命中 topK=8 条片段，每条带文件名、相似度与三行摘录，
+   * 展开后轻松占掉两三屏 —— 真正要读的回答正文反而被挤到看不见。
+   * 收起状态保留"引用来源（N）· 耗时 X ms"这一行，信息不丢、只把体积收起来。
+   */
+  sourcesOpen?: boolean
   /** 「记住这条」面板是否展开 */
   rememberOpen?: boolean
   /** 面板里的内容，默认取回答正文 */
@@ -366,16 +374,26 @@ onMounted(async () => {
           <div class="bubble">
             <div class="preserve-whitespace">{{ b.content }}<span v-if="b.streaming" class="caret">▍</span></div>
 
+            <!--
+              引用来源做成折叠面板：默认收起，点标题行才展开。
+              收起时那一行把"几条 + 耗时"都写清楚，所以不会因为折叠而丢信息。
+            -->
             <div v-if="b.sources && b.sources.length" class="sources">
-              <div class="sources-title">
-                引用来源（{{ b.sources.length }}）· 耗时 {{ b.elapsedMs }} ms
+              <div class="sources-toggle" @click="b.sourcesOpen = !b.sourcesOpen">
+                <span class="sources-caret">{{ b.sourcesOpen ? '▾' : '▸' }}</span>
+                <span>引用来源（{{ b.sources.length }}）</span>
+                <span v-if="b.elapsedMs != null" class="sources-elapsed">· 耗时 {{ b.elapsedMs }} ms</span>
+                <span class="sources-action">{{ b.sourcesOpen ? '收起' : '展开' }}</span>
               </div>
-              <div v-for="(s, si) in b.sources" :key="si" class="source">
-                <div class="source-head">
-                  <el-tag size="small" type="info">{{ s.fileName || '未知文档' }}</el-tag>
-                  <span class="score mono" v-if="s.score != null">相似度 {{ s.score.toFixed(3) }}</span>
+
+              <div v-if="b.sourcesOpen" class="sources-body">
+                <div v-for="(s, si) in b.sources" :key="si" class="source">
+                  <div class="source-head">
+                    <el-tag size="small" type="info">{{ s.fileName || '未知文档' }}</el-tag>
+                    <span class="score mono" v-if="s.score != null">相似度 {{ s.score.toFixed(3) }}</span>
+                  </div>
+                  <div class="source-text">{{ s.snippet }}</div>
                 </div>
-                <div class="source-text">{{ s.snippet }}</div>
               </div>
             </div>
 
@@ -546,10 +564,45 @@ onMounted(async () => {
   border-top: 1px dashed #e3e6eb;
 }
 
-.sources-title {
+/* 折叠标题行：整行可点，hover 时给一点反馈，让人知道它是可展开的 */
+.sources-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
+  color: #6b7280;
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 0;
+  border-radius: 4px;
+}
+
+.sources-toggle:hover {
+  color: #2e5496;
+  background: #f5f7fb;
+}
+
+.sources-caret {
+  width: 12px;
+  font-size: 11px;
   color: #9aa0a6;
-  margin-bottom: 6px;
+}
+
+.sources-elapsed {
+  color: #9aa0a6;
+}
+
+.sources-action {
+  margin-left: auto;
+  color: #2e5496;
+  font-size: 11px;
+}
+
+/* 展开后的片段列表：给个上限高度，条数多时内部滚动，不再把正文顶走 */
+.sources-body {
+  margin-top: 8px;
+  max-height: 320px;
+  overflow: auto;
 }
 
 .source {
