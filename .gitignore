@@ -40,6 +40,13 @@ web/node_modules/
 web/dist/
 .pnpm-store/
 
+### ── Python（OCR 脚本的编译缓存，由 py_compile / 首次运行生成）──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
 ### ── 日志与临时文件 ───────────────────────────────────────
 *.log
 logs/
