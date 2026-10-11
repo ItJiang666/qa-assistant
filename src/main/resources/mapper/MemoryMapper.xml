@@ -28,6 +28,17 @@
     <!--
       同一主题再次被提到：更新内容，并把置信度/重要度向高处取。
       GREATEST 在 H2 与 MySQL 上都存在。
+
+      ⚠️ WHERE 里的 `status = 'ACTIVE'` 是**必须的**，不要删。
+      原因（实测 bug）：唯一键是 (user_id, mem_key)，而本方法原先的 WHERE 只有
+      user_id + mem_key，SET 里又写着 status = 'ACTIVE' —— 于是
+        「用户删除记忆」→ status='DELETED'
+        → 下一轮问答异步抽取到同一个 mem_key
+        → 这里 UPDATE 命中那条已删除的行、把它改回 'ACTIVE'
+        → 记忆原地复活（重启服务也没用，因为数据库里的行真的被改回来了）
+      evictOverflow 淘汰掉的记忆同样会因此复活。
+      加上 status='ACTIVE' 后：已删除/已淘汰的行不再被自动改写，
+      自动抽取也不能推翻用户明确的删除动作。
     -->
     <update id="updateByUserAndKey" parameterType="com.itjiang.qa.model.entity.Memory">
         UPDATE qa_memory
@@ -35,9 +46,8 @@
             memory_type = #{memoryType},
             confidence  = GREATEST(confidence, #{confidence}),
             importance  = GREATEST(importance, #{importance}),
-            status      = 'ACTIVE',
             updated_at  = CURRENT_TIMESTAMP
-        WHERE user_id = #{userId} AND mem_key = #{memKey}
+        WHERE user_id = #{userId} AND mem_key = #{memKey} AND status = 'ACTIVE'
     </update>
 
     <select id="selectById" resultType="com.itjiang.qa.model.entity.Memory">

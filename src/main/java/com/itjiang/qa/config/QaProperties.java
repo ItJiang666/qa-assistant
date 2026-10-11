@@ -717,16 +717,19 @@ public class QaProperties {
         /**
          * 单次回答的最大生成长度（token），对应 Ollama 的 {@code num_predict}。
          *
-         * <p>默认 1024，两个用途：
+         * <p>默认 <b>2048</b>，两个用途：
          * <ol>
-         *   <li><b>延迟兜底</b>：本地实测生成速度约 60 token/s，不设上限时模型偶尔会长篇大论，
-         *       单次回答轻松超过 10 秒。1024 token 约合 700 汉字，与开发文档 4.6.6
-         *       的"回答预算 ≈1000 token"一致。</li>
+         *   <li><b>别把完整答案截断</b>：原先取值 1024（约 700 汉字），是按"回答控制在
+         *       200 字以内"那条提示词配的。2026-10-12 提示词改成"答完整"之后，
+         *       700 字的余量对"把资料里各方面都列出来"就偏紧了 ——
+         *       截断发生在用户看不见的地方（回答戛然而止且无提示），比慢几秒更糟。</li>
          *   <li><b>防止跑飞</b>：极端情况下模型可能进入复读，有硬上限才能保证请求最终结束。</li>
          * </ol>
+         * 2048 token 约合 1400 汉字。实测完整回答里最长的一条是 409 字（约 600 token），
+         * 所以这个上限留了足够余量，同时仍能在复读时兜住。
          * 填 0 或负数表示不限制（回到模型默认）。
          */
-        private int maxOutputTokens = 1024;
+        private int maxOutputTokens = 2048;
 
         /** 模型调用超时（ISO-8601 时长格式）。 */
         private String timeout = "120s";
@@ -926,7 +929,7 @@ public class QaProperties {
             private int maxRetries = 2;
 
             /** 单次回答 token 上限，语义与 {@code qa.local.max-output-tokens} 一致。 */
-            private int maxOutputTokens = 1024;
+            private int maxOutputTokens = 2048;
 
             /**
              * 抽取模型是否要求 JSON 输出（{@code response_format: json_object}）。

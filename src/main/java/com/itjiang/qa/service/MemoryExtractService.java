@@ -251,9 +251,18 @@ public class MemoryExtractService {
         try {
             memoryMapper.insert(entity);
         } catch (Exception ex) {
-            // 并发抽取同一主题时可能撞上唯一约束：此时改成更新一次即可
-            log.debug("记忆插入冲突，转为更新: key={}", memKey);
-            memoryMapper.updateByUserAndKey(entity);
+            // 走到这里说明"同一 (user_id, mem_key) 已存在一行、但它不是 ACTIVE"
+            // —— 也就是这条记忆被用户删掉、或被 evictOverflow 淘汰过。
+            //
+            // ★ 此时**刻意什么都不做**：用户删掉的记忆不该被下一轮对话的自动抽取
+            //   悄悄造回来。原先这里回退成 updateByUserAndKey，而那个 UPDATE 的
+            //   SET 里带着 status='ACTIVE'，等于把删除撤销掉 —— 这就是"删了还出现"
+            //   的真正原因（详见 MemoryMapper.xml 的注释）。
+            //
+            // 用 INFO 而不是 DEBUG：这条信息解释了"为什么我刚说的事它没记住"，
+            // 排查时是最先要找的一行，藏在 DEBUG 里等于没有。
+            log.info("该主题曾被删除或淘汰，本次抽取不写回: key={}, 内容={}",
+                    memKey, abbreviate(entity.getContent()));
         }
     }
 

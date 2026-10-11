@@ -127,7 +127,13 @@ onMounted(load)
 
     <el-card shadow="never" class="block">
       <template #header><span class="card-title">运行状态</span></template>
-      <el-descriptions :column="2" border size="small">
+      <!--
+        单列（`:column="1"`）而不是双列。原因：这里的每个字段都带一句补充说明
+        （如"开＝回答更准…但首字多约 1 秒；关＝更快…"），双列时那句话被挤进约半屏宽的
+        格子里折成好几行，整块又高又挤，观感很差。单列后说明文字能用满整行宽，
+        行高明显下降，同一屏能看到更多内容 —— 也就是"直接铺开"。
+      -->
+      <el-descriptions :column="1" border size="small" class="status-desc">
         <el-descriptions-item label="对话模式">
           <el-tag size="small" :type="status?.runMode === 'cloud' ? 'warning' : 'info'">
             {{ status?.runMode }}
@@ -234,12 +240,12 @@ onMounted(load)
     <el-card shadow="never" class="block">
       <template #header>
         <span class="card-title">生效参数</span>
-        <span class="hint">这些是**跑起来实际生效**的值，可能与 yml 不同（环境变量可覆盖）</span>
+        <span class="hint">这些是跑起来实际生效的值，可能与 yml 不同（环境变量可覆盖）</span>
       </template>
-      <el-descriptions :column="2" border size="small">
+      <el-descriptions :column="1" border size="small" class="status-desc">
         <el-descriptions-item label="检索条数 topK">
           {{ status?.retrieval.topK }}
-          <span class="hint">实测拐点，见开发文档 9.2</span>
+          <span class="hint">决定"一次给模型看多少资料"，直接影响回答完整度；上限 10</span>
         </el-descriptions-item>
         <el-descriptions-item label="相似度阈值 minScore">
           {{ status?.retrieval.minScore }}
@@ -359,6 +365,37 @@ onMounted(load)
   color: #9aa0a6;
   font-size: 12px;
   margin-left: 6px;
+}
+
+/*
+ * 状态/参数表的排版修正（2026-10-12）。
+ *
+ * 三件事：
+ *  1) 标签列定宽 132px：原先由浏览器按最长标签自适应，字段一多就对不齐，
+ *     视觉上像一堆错落的格子。定宽后可读性立刻稳定。
+ *  2) .hint 独占一行：这些都是补充说明（有的长达 80 字），跟在数值后面会与
+ *     数值一起换行，读起来分不清哪是值哪是说明。独占一行后数值一行、说明一行。
+ *  3) 去掉 .hint 的左边距：独占一行时那个 6px 缩进会让说明文字与标签列错位，
+ *     看着像是没对齐的残留。
+ *
+ * :deep() 是必须的 —— el-descriptions 的单元格由组件内部渲染，
+ * scoped 样式默认作用不到。
+ */
+.status-desc :deep(.el-descriptions__label) {
+  width: 132px;
+  min-width: 132px;
+  color: #606266;
+  vertical-align: top;
+}
+
+.status-desc :deep(.el-descriptions__content) {
+  line-height: 1.7;
+}
+
+.status-desc .hint {
+  display: block;
+  margin-left: 0;
+  margin-top: 2px;
 }
 
 .mono {
