@@ -33,14 +33,17 @@ public interface OcrEngine {
     Availability availability();
 
     /**
-     * 识别一个 PDF。
+     * 识别一个文件（PDF 或图片）。
      *
-     * @param pdf       PDF 绝对路径
+     * <p>图片走同一条路：PyMuPDF 把 {@code .jpg/.png/...} 当"只有一页、文字层为空"的
+     * 文档打开，所以实现里不需要区分两者 —— 区别只在"用户传了什么"。
+     *
+     * @param file       文件绝对路径（PDF 或图片）
      * @param documentId 文档 ID（回填进结果，便于前端关联）
      * @return 识别结果
      * @throws OcrException 识别失败；异常里带<b>可照做</b>的提示与错误码
      */
-    OcrResult recognize(Path pdf, Long documentId);
+    OcrResult recognize(Path file, Long documentId);
 
     /**
      * 引擎可用性状态。

@@ -47,10 +47,17 @@ public class QaProperties {
      * 但老式二进制的解析健壮性不如 OOXML —— 复杂表格、嵌入对象、域代码
      * 可能解析不全。所以文档里统一建议"优先用 .docx"。
      *
+     * <p><b>图片（jpg/jpeg/png/webp/bmp）与文字型格式的定位完全不同</b>，
+     * 别把两者混为一谈：Tika 从图片里<b>提不出任何文字</b>（没有文字层），
+     * 所以图片上传后必然停在"解析失败"，需要用户再点一次「识别文字」走 OCR
+     * ——与扫描版 PDF 是同一条路。图片的扩展名必须在
+     * {@code qa.ocr.recognizable-extensions} 里同样列一份，否则会出现
+     * "能上传但识别按钮永远置灰"的死角（见该字段说明）。
+     *
      * <p><b>顺序有意义</b>：报错话术会按这个顺序原样展示给用户，
      * 别改成 Set 或重排。
      */
-    private String allowedExtensions = "txt,md,docx,doc,pdf,xlsx,html";
+    private String allowedExtensions = "txt,md,docx,doc,pdf,xlsx,html,jpg,jpeg,png,webp,bmp";
 
     private Ingest ingest = new Ingest();
     private Retrieval retrieval = new Retrieval();
@@ -78,6 +85,36 @@ public class QaProperties {
 
         /** 是否允许尝试 OCR。关掉后界面直接置灰，不再探测。 */
         private boolean enabled = true;
+
+        /**
+         * 哪些扩展名值得走 OCR，逗号分隔。
+         *
+         * <h2>为什么需要它</h2>
+         * <p>OCR 的价值只有一个：<b>从没有文字层的东西里把字读出来</b>。
+         * 两类文件符合：
+         * <ul>
+         *   <li>{@code pdf} —— 扫描版 PDF 没有文字层（文字版 PDF 有，走普通解析即可）；</li>
+         *   <li>{@code jpg/jpeg/png/webp/bmp} —— 图片<b>永远</b>没有文字层。</li>
+         * </ul>
+         * 其它格式（docx/doc/txt/md/xlsx/html）本来就带文字层，点「识别文字」
+         * 等于把已经能读的字再"猜"一遍，纯属帮倒忙，所以拒绝并说明理由。
+         *
+         * <h2>为什么不干脆放开所有格式</h2>
+         * <p>放开的话，用户对一份正常 docx 点识别能得到"可用的结果"（OCR 确实认得出来），
+         * 于是他会以为这条路更好 —— 实际拿到的是<b>带错字的近似文本</b>，
+         * 还把原件里清晰的文字层换成了机器猜的。这不是能力问题，是会误导人。
+         *
+         * <h2>与 allowed-extensions 的关系（重要）</h2>
+         * <p>两者<b>独立配置、必须保持同步</b>：本项多出一个扩展名只会让按钮亮起来，
+         * 上传那一步仍会被 {@code allowed-extensions} 挡住；
+         * 反过来 {@code allowed-extensions} 多出 jpg 而本项没有，
+         * 就会出现"能上传、解析必然失败、识别按钮却永远置灰"的死角 ——
+         * 文件躺在列表里既不能用也删不掉（其实能删，但用户会以为坏了）。
+         *
+         * <p>不做成"自动取 allowed-extensions 的子集"：那样两个概念被绑死，
+         * 以后想单独放开某个格式就得先拆结构。宁可多一行配置 + 一句提醒。
+         */
+        private String recognizableExtensions = "pdf,jpg,jpeg,png,webp,bmp";
 
         /**
          * Python 解释器路径。
@@ -129,6 +166,14 @@ public class QaProperties {
 
         public void setEnabled(boolean enabled) {
             this.enabled = enabled;
+        }
+
+        public String getRecognizableExtensions() {
+            return recognizableExtensions;
+        }
+
+        public void setRecognizableExtensions(String recognizableExtensions) {
+            this.recognizableExtensions = recognizableExtensions;
         }
 
         public String getPython() {
@@ -372,20 +417,38 @@ public class QaProperties {
         /**
          * 相似度阈值，低于它的片段不交给模型。
          *
-         * <p><b>默认 0.75。</b>它是防幻觉的第一道闸门：低于阈值的片段不进 Prompt，
+         * <p><b>默认 0.65。</b>它是防幻觉的第一道闸门：低于阈值的片段不进 Prompt，
          * 从而触发"空资料占位符"这条路径。
          *
-         * <p>实测分数分布（本地 qwen3.5:9b + 三份真实文档）：完全无关的话题
-         * 0.63~0.73、话题相关但不含答案 0.81~0.89、真正含答案 0.83~0.89。
-         * <b>后两档互相重叠</b>，所以这个阈值<b>切不掉"相关但没答案"的片段</b>，
-         * 只能清掉完全无关的那一批 —— 别指望靠调它解决幻觉。
+         * <h2>为什么从 0.75 降到 0.65（2026-10-11 实测）</h2>
+         * <p>0.75 是在<b>三份 206/8/4 块的大文档</b>上调出来的，对那种库完全正确
+         * （无关提问 0.63~0.73 被挡住）。但它有个当时没暴露的毛病：
+         * <b>短文档的相似度天然偏低</b>，会被一并误杀。
          *
-         * <p>旧值 0.6 低于所有实际分数，等于没有过滤（任何提问都返回满 topK 条）；
-         * 0.75 让完全无关的提问回落到 0 条，既缩短上下文，也让"没有资料"路径
-         * 真正有机会被触发。调大的风险是误杀真正含答案的片段，表现为
-         * "库里明明有的问题却答未找到"。
+         * <p>决定性对照（同内容、同块大小，只差"有没有文字层"）：
+         * <pre>
+         *   扫描件（3 页无文字层，走 OCR）  6 问平均 0.7010，过 0.75 的 0/6
+         *   同一内容的有文字层 PDF         6 问平均 0.7220，过 0.75 的 1/6
+         * </pre>
+         * 也就是说：<b>这跟 OCR 准不准、跟是不是图片都无关</b> ——
+         * 是"短文本对短查询"这个组合本身分低。实测分数与库的规模强相关：
+         * <pre>
+         *   206 块 / 每块 500~1000 字  →  0.80 ~ 0.85
+         *   1~3 块 / 每块 400~500 字   →  0.67 ~ 0.78
+         * </pre>
+         * 代价是这类文档在 0.75 下"入库成功却永远检索不到"，而界面上完全看不出原因。
+         *
+         * <h2>为什么是 0.65 而不是 0.70</h2>
+         * <p>0.70 救不回上面那批文档（分数 0.67~0.74，多数仍被挡）；
+         * 0.65 能救回，且经探针验证没有引入编造 —— 域外与"话题相关但无答案"共 11 问，
+         * 在 0.65 下仍全部如实回答"现有资料中未找到相关信息"。
+         *
+         * <h2>仍然切不掉的那一类</h2>
+         * <p>实测分数分布里"话题相关但不含答案"是 0.81~0.89，比"真正含答案"的
+         * 0.83~0.89 还要高一点 —— <b>两者重叠</b>，所以任何阈值都切不掉这一类。
+         * 别指望靠调它解决幻觉；它只能挡住"完全无关"的那一批。
          */
-        private double minScore = 0.75;
+        private double minScore = 0.65;
 
         private QueryExpansion queryExpansion = new QueryExpansion();
 

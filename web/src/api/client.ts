@@ -213,6 +213,13 @@ export interface OcrAvailability {
   maxPages: number
   dpi: number
   timeout: string
+  /**
+   * 哪些扩展名能点「识别文字」（小写），由后端下发。
+   *
+   * 不在这里写死：这份清单同时决定"按钮出不出现"。前端另存一份的话，
+   * 后端加了格式而前端忘了改，症状是"功能明明在，界面上找不到入口" —— 最难查的那种。
+   */
+  recognizableExtensions: string[]
   /** 不可用时给用户的下一步指引（含 pip 安装命令）；可用时为 null。 */
   hint: string | null
 }

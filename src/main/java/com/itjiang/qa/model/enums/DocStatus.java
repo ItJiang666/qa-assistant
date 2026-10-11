@@ -4,7 +4,7 @@ package com.itjiang.qa.model.enums;
  * 文档入库状态（表 {@code qa_document.status}）。
  *
  * <p>用途不只是"显示一个标签"，它是<b>失败留痕</b>的载体：
- * 用户上传一个扫描版 PDF 后检索不到内容时，唯一能解释原因的地方就是
+ * 用户上传一个扫描版 PDF 或图片后检索不到内容时，唯一能解释原因的地方就是
  * {@code status=FAILED} + {@code errorMessage}。没有它，用户只会觉得"这系统不好用"。
  *
  * @author Jiang

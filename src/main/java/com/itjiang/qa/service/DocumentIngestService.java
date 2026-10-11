@@ -55,6 +55,25 @@ public class DocumentIngestService {
 
     private static final Logger log = LoggerFactory.getLogger(DocumentIngestService.class);
 
+    /**
+     * 文件没有文字层时写给用户看的失败原因。
+     *
+     * <p><b>为什么抽成常量：</b>这句话有<b>两条</b>触发路径 ——
+     * Tika 返回空文本，以及 Tika 直接抛 {@code BlankDocumentException}（实测主要是后者）。
+     * 原先两处各写一份，措辞已经走偏过一次：一条说"可用「识别文字」"，
+     * 另一条还停在"需要 OCR，本期不支持"——而后者才是用户实际看到的那条。
+     * 同一个事实有两份文案，就一定会有一份过期。
+     *
+     * <p><b>措辞要点：</b>① 这两种文件（扫描版 PDF、纯图片）在用户眼里毫不相干，
+     * 所以都要点名；② 必须给出<b>下一步动作</b>而不是"不支持"——
+     * 界面上那列的按钮就叫「识别文字」，这三个字直接对上，用户才知道点哪儿。
+     * 位置写"操作"列（表格里那列的列名），不写"右侧"：窗口窄时列会换位，
+     * 方位词会变成假信息。
+     */
+    private static final String NO_TEXT_LAYER_MESSAGE =
+            "解析结果为空。该文件可能是扫描版 PDF 或纯图片，没有可提取的文字层"
+                    + "（可用「操作」列的「识别文字」在本机 OCR 后入库）";
+
     /** metadata 键：文档 ID。删除向量时按它过滤，不能改名。 */
     public static final String META_DOCUMENT_ID = SegmentMetadata.DOCUMENT_ID;
 
@@ -115,8 +134,7 @@ public class DocumentIngestService {
 
             // ── [2] 空文本检查 ────────────────────────────────────────
             if (text == null || text.isBlank()) {
-                markFailed(documentId, "解析结果为空。该文件可能是扫描版 PDF 或纯图片，"
-                        + "没有可提取的文字层（需要 OCR，本期不支持）");
+                markFailed(documentId, NO_TEXT_LAYER_MESSAGE);
                 log.warn("解析结果为空: id={}, file={}", documentId, doc.getFileName());
                 return;
             }
@@ -138,8 +156,7 @@ public class DocumentIngestService {
             //
             //   这正是开发文档第 9 章「何时拆分 Python」决策树的第一个判断点，
             //   必须给出人能看懂的结论。
-            markFailed(documentId, "解析结果为空。该文件可能是扫描版 PDF 或纯图片，"
-                    + "没有可提取的文字层（可用「识别文字」在本机 OCR 后入库）");
+            markFailed(documentId, NO_TEXT_LAYER_MESSAGE);
             log.warn("文档无文字层（疑似扫描件）: id={}, file={}", documentId, doc.getFileName());
 
         } catch (Exception ex) {

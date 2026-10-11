@@ -46,7 +46,7 @@ public enum ErrorCode {
      */
     INDEX_MODEL_MISMATCH(1006, "向量索引与当前向量模型不匹配，请重建索引", HttpStatus.UNPROCESSABLE_ENTITY),
 
-    // ── OCR（扫描版 PDF 本地识别）────────────────────────────────────────────
+    // ── OCR（扫描版 PDF / 图片的本地识别）────────────────────────────────────
     /**
      * 本机 OCR 不可用。
      *

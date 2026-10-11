@@ -9,6 +9,17 @@
   * 子进程崩了不影响主进程，还能被超时强杀；
   * 冷启动只要 0.4 s，代价可以忽略。
 
+## 输入：PDF **或**单张图片
+
+PyMuPDF 既能开 PDF，也能直接把 `.jpg/.png/.webp/.bmp` 当"只有一页的文档"打开
+（`page_count == 1`，页面矩形就是图片尺寸，且**文字层恒为空**）。
+所以图片不需要任何特殊分支：它就是"一页、且肯定没有文字层"的扫描件，
+走完全同一条渲染 → 检测的路径。
+
+实测（1200×760 的中文截图，`--dpi 200`）：165 字、置信度 0.9769、1.85 s；
+同一张图塞进 PDF 再识别是 224 字 / 0.9749 —— 多出来的字是"内嵌插图"通道
+把那行重复识别了一遍，**并没有多读到内容**。也就是说图片这条路更干净。
+
 ## 为什么全程离线是硬要求
 
 本项目的卖点是"数据不出内网"。扫描件往往是最敏感的材料（合同、档案、证件），
@@ -33,6 +44,10 @@ stdout 里必须出现且只出现一对哨兵，中间是**单行 JSON**：
    各自单独识别。补的是主流程的盲区 —— 文字检测器只会"找字"，
    它认不出"这块图里有内容"，于是整块跳过。
 
+   对**单张图片输入**这条路径基本是空转：整张图就是页面本身，
+   抽出来的插图与页面内容重复，会被下面的去重逻辑整块丢弃。
+   不做特殊处理 —— 多跑一次的代价远小于为它维护一个分支。
+
 用 `--detect-images off` 可以关掉第 2 条，回到旧行为。
 
 ## 退出码（Java 侧据此给不同提示，比解析文本可靠）
@@ -41,13 +56,13 @@ stdout 里必须出现且只出现一对哨兵，中间是**单行 JSON**：
     2  依赖缺失（rapidocr / pymupdf 没装）
     3  参数错误（文件不存在、页范围非法）
     4  页数超限
-    5  PDF 打不开（损坏或加密）
+    5  文件打不开（PDF 损坏/加密，或图片格式不受支持）
     6  识别结果为空
     7  未预期的内部错误
 
 用法：
     python qa_ocr.py --check                       # 依赖自检（Java 侧用它判断可用性）
-    python qa_ocr.py <pdf路径> [--max-pages 50] [--dpi 200] [--min-confidence 0.5]
+    python qa_ocr.py <文件路径> [--max-pages 50] [--dpi 200] [--min-confidence 0.5]
                                [--detect-images on|off] [--max-images 60]
 """
 
@@ -79,6 +94,9 @@ EXIT_OK = 0
 EXIT_NO_DEPENDENCY = 2
 EXIT_BAD_ARGS = 3
 EXIT_TOO_MANY_PAGES = 4
+# 名字保留 PDF 前缀：Java 侧（RapidOcrEngine）按这个数字映射用户提示，
+# 改常量名会牵动两端，而"5 号 = 文件打不开"的语义并没有变，只是它现在
+# 也覆盖"图片格式不受支持"。改名的收益不足一次跨语言同步。
 EXIT_PDF_UNREADABLE = 5
 EXIT_EMPTY_RESULT = 6
 EXIT_INTERNAL = 7
@@ -364,7 +382,10 @@ def dedup_repeated_lines(lines: list[str]) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="qa-assistant 本地离线 OCR")
-    parser.add_argument("pdf", nargs="?", help="待识别的 PDF 路径")
+    # 位置参数叫 input_path 而不是 pdf：图片（.jpg/.png/…）同样走这条路，
+    # 名字、帮助文本、报错话术都必须对得上，否则用户看到"未提供 PDF 路径"
+    # 会以为自己传错了格式。
+    parser.add_argument("input_path", nargs="?", help="待识别的文件路径（PDF 或图片）")
     parser.add_argument("--check", action="store_true", help="只做依赖自检")
     parser.add_argument("--max-pages", type=int, default=50, help="页数上限，超出直接拒绝")
     parser.add_argument("--dpi", type=int, default=200, help="拆页渲染 DPI，越高越准也越慢")
@@ -401,10 +422,10 @@ def main() -> int:
 
     started = time.time()
 
-    if not args.pdf:
-        return fail(EXIT_BAD_ARGS, "未提供 PDF 路径")
-    if not os.path.isfile(args.pdf):
-        return fail(EXIT_BAD_ARGS, "文件不存在：%s" % args.pdf)
+    if not args.input_path:
+        return fail(EXIT_BAD_ARGS, "未提供文件路径（PDF 或图片）")
+    if not os.path.isfile(args.input_path):
+        return fail(EXIT_BAD_ARGS, "文件不存在：%s" % args.input_path)
 
     # 依赖缺失要单独报，与"识别失败"区分开：前者用户装一下就好，后者要查文件
     try:
@@ -416,11 +437,14 @@ def main() -> int:
     except Exception:
         return fail(EXIT_NO_DEPENDENCY, "缺少依赖 rapidocr，请执行：pip install rapidocr")
 
-    # ---- 打开 PDF ----
+    # ---- 打开文件 ----
+    # PyMuPDF 对 PDF 和图片是同一个入口：图片会变成"一页、文字层为空"的文档。
+    # 所以下面这一整段逻辑不需要区分两者 —— 这也正是把图片纳入进来的成本
+    # 几乎为零的原因（区别只在"用户传了什么"，不在"怎么处理"）。
     try:
-        doc = pymupdf.open(args.pdf)
+        doc = pymupdf.open(args.input_path)
     except Exception as exc:
-        return fail(EXIT_PDF_UNREADABLE, "PDF 打不开（可能已损坏）：%s" % exc)
+        return fail(EXIT_PDF_UNREADABLE, "文件打不开（可能已损坏，或图片格式不受支持）：%s" % exc)
     if doc.needs_pass:
         doc.close()
         return fail(EXIT_PDF_UNREADABLE, "该 PDF 有密码保护，请先解除密码后重传")
@@ -428,7 +452,7 @@ def main() -> int:
     total_pages = doc.page_count
     if total_pages == 0:
         doc.close()
-        return fail(EXIT_PDF_UNREADABLE, "该 PDF 没有任何页面")
+        return fail(EXIT_PDF_UNREADABLE, "该文件没有任何页面（或图片内容为空）")
 
     # 页数上限在**应用层**挡：Python 侧若因页数过多 OOM，会被系统直接杀掉，
     # 那时 Java 只能看到一个退出码，给不出"请减少页数"这种可照做的提示。

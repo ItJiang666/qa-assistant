@@ -48,9 +48,25 @@ function statusLabel(status: DocumentItem['status']) {
 }
 
 /**
+ * 这一行的格式能不能走 OCR（识别文字）。
+ *
+ * 判断依据来自后端下发的 `recognizableExtensions`（扫描版 PDF + 各种图片），
+ * **不在前端写死**：后端加一种格式而前端忘了同步，症状是"功能明明在，
+ * 界面上却没有入口"。拿不到配置时（接口还没返回）保守返回 false ——
+ * 宁可晚半秒出现按钮，也不要出现一个点下去必然报错的按钮。
+ */
+function isRecognizableType(row: DocumentItem): boolean {
+  const types = ocr.value?.recognizableExtensions
+  if (!types || types.length === 0) {
+    return false
+  }
+  return types.includes((row.fileType || '').toLowerCase())
+}
+
+/**
  * 这一行能不能点「识别文字」。
  *
- * 三个条件缺一不可：是 PDF（OCR 只对图像型文档有意义）、不在处理中
+ * 三个条件缺一不可：格式可识别（图像型文档）、不在处理中
  * （PENDING/PARSING 时文件还没落定）、且本机 OCR 可用。
  * 已入库的文档也允许再识别？——不允许：重复识别同一份会把内容入库两遍，
  * 而界面上没有办法区分这两份重复内容。想重来就先删除。
@@ -59,7 +75,7 @@ function statusLabel(status: DocumentItem['status']) {
  * 置灰配 tooltip 才能告诉他缺什么、怎么补。
  */
 function canRecognize(row: DocumentItem): boolean {
-  return row.fileType === 'pdf'
+  return isRecognizableType(row)
       && row.status !== 'INDEXED'
       && row.status !== 'PARSING'
       && row.status !== 'PENDING'
@@ -68,8 +84,9 @@ function canRecognize(row: DocumentItem): boolean {
 
 /** 识别按钮不可用时的原因（鼠标悬停可见）。 */
 function recognizeTooltip(row: DocumentItem): string {
-  if (row.fileType !== 'pdf') {
-    return '「识别文字」只对 PDF 有效：其它格式本来就带文字层，直接上传即可被解析'
+  if (!isRecognizableType(row)) {
+    // 走到这里只剩"解析失败、需要靠 OCR 救回来"的行（见 showRecognizeButton）
+    return '该文件没有可提取的文字层，可用「识别文字」在本机 OCR 后入库'
   }
   if (row.status === 'INDEXED') {
     return '该文档已入库；如需重新识别，请先删除再重新上传'
@@ -80,7 +97,22 @@ function recognizeTooltip(row: DocumentItem): string {
   if (!ocr.value?.available) {
     return ocr.value?.hint || '本机 OCR 不可用'
   }
-  return '在本机识别该扫描件的文字（不联网），识别完成后需要你确认才会入库'
+  return '在本机识别该文件的文字（不联网），识别完成后需要你确认才会入库'
+}
+
+/**
+ * 这一行要不要显示「识别文字」按钮。
+ *
+ * <p>判据是"**点了有没有意义**"，而不是"格式是不是图像型"：
+ * ① 格式可识别（扫描版 PDF / 图片）——本来就该给入口；
+ * ② 解析失败——文件在库里却用不了，这时哪怕格式不在清单里也要给按钮，
+ *    用置灰 + tooltip 告诉他"这份没有文字层，可以试试点这里"，总好过让他对着
+ *    一个红色"失败"发呆。这条路径上用户最需要的就是下一步动作。
+ * 其余情况（txt/docx 等正常入库的行）不显示：一个永远置灰的按钮纯属视觉噪音，
+ * 还会让人怀疑"是不是我这份文件有问题"。
+ */
+function showRecognizeButton(row: DocumentItem): boolean {
+  return isRecognizableType(row) || (row.status === 'FAILED' && ocr.value?.available === true)
 }
 
 async function loadOcrAvailability() {
@@ -256,7 +288,7 @@ onBeforeUnmount(() => {
         <div class="card-header">
           <span>上传文档</span>
           <span class="hint">
-            支持 txt / md / docx / doc / pdf / xlsx / html，单文件不超过 50MB
+            支持 txt / md / docx / doc / pdf / xlsx / html / jpg / jpeg / png / webp / bmp，单文件不超过 50MB
           </span>
         </div>
       </template>
@@ -266,11 +298,12 @@ onBeforeUnmount(() => {
           multiple
           :show-file-list="false"
           :http-request="handleUpload"
-          accept=".txt,.md,.docx,.doc,.pdf,.xlsx,.html">
+          accept=".txt,.md,.docx,.doc,.pdf,.xlsx,.html,.jpg,.jpeg,.png,.webp,.bmp">
         <div class="drop-zone">
           <div class="drop-title">把文件拖到这里，或点击选择</div>
           <div class="drop-sub">
-            扫描版 PDF（纯图片、没有文字层）会解析失败 —— 那是预期行为，会在下方表格里给出原因
+            扫描版 PDF、图片（jpg / png 等）没有文字层，上传后会解析失败 —— 那是预期行为，
+            在下方表格里点「识别文字」即可在本机识别后入库
           </div>
         </div>
       </el-upload>
@@ -314,12 +347,12 @@ onBeforeUnmount(() => {
         <el-table-column label="操作" width="190" fixed="right">
           <template #default="{ row }">
             <!--
-              按钮只在 PDF 行出现：对 txt/docx 这类本来就带文字层的格式，
-              一个永远置灰的按钮纯属视觉噪音，还会让人怀疑"是不是我这份文件有问题"。
+              按钮的条件见 showRecognizeButton：可识别的格式（扫描版 PDF / 图片）
+              一律给入口；解析失败的行也给，因为那正是"下一步该点这里"的场景。
               不可用的原因（未装依赖/已入库/处理中）仍用 tooltip 说明。
             -->
             <el-tooltip
-                v-if="row.fileType === 'pdf'"
+                v-if="showRecognizeButton(row)"
                 :content="recognizeTooltip(row)" placement="top" :show-after="300">
               <span>
                 <el-button
@@ -345,7 +378,7 @@ onBeforeUnmount(() => {
       <el-alert
           v-if="ocr && !ocr.available"
           type="info" :closable="false" show-icon class="ocr-alert">
-        <template #title>本机未启用扫描件文字识别（可选功能）</template>
+        <template #title>本机未启用扫描件与图片的文字识别（可选功能）</template>
         <div class="ocr-alert-body">{{ ocr.hint }}</div>
       </el-alert>
       <el-alert

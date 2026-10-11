@@ -2,6 +2,7 @@ package com.itjiang.qa.service;
 
 import com.itjiang.qa.common.BusinessException;
 import com.itjiang.qa.common.ErrorCode;
+import com.itjiang.qa.config.QaProperties;
 import com.itjiang.qa.mapper.DocumentMapper;
 import com.itjiang.qa.model.dto.OcrPreviewResponse;
 import com.itjiang.qa.model.dto.OcrResult;
@@ -16,8 +17,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 /**
  * 扫描件 OCR 的编排：识别 → 人工确认 → 入库。
@@ -54,6 +60,7 @@ public class OcrService {
     private final DocumentMapper documentMapper;
     private final DocumentIngestService ingestService;
     private final OcrEngine ocrEngine;
+    private final QaProperties properties;
 
     /**
      * 待确认的识别结果：documentId → (文本 + 元信息 + 产生时刻)。
@@ -66,10 +73,12 @@ public class OcrService {
 
     public OcrService(DocumentMapper documentMapper,
                       DocumentIngestService ingestService,
-                      OcrEngine ocrEngine) {
+                      OcrEngine ocrEngine,
+                      QaProperties properties) {
         this.documentMapper = documentMapper;
         this.ingestService = ingestService;
         this.ocrEngine = ocrEngine;
+        this.properties = properties;
     }
 
     /**
@@ -93,12 +102,13 @@ public class OcrService {
             throw new BusinessException(ErrorCode.DOC_NOT_FOUND);
         }
 
-        // 只对 PDF 有意义：OCR 的价值在于"从图像里读出文字"，
-        // docx/txt 本来就带文字层，走普通解析路径即可，没必要绕一圈 OCR。
-        String type = doc.getFileType() == null ? "" : doc.getFileType().toLowerCase();
-        if (!"pdf".equals(type)) {
+        // OCR 只对"没有文字层"的文件有意义：扫描版 PDF 与图片。
+        // docx/txt 本来就带文字层，走普通解析路径即可 —— 对它们做 OCR 是把
+        // 清晰的原文换成带错字的猜测，纯属帮倒忙（见 QaProperties.Ocr 的说明）。
+        String type = doc.getFileType() == null ? "" : doc.getFileType().toLowerCase(Locale.ROOT);
+        if (!recognizableExtensions().contains(type)) {
             throw new BusinessException(ErrorCode.PARAM_INVALID,
-                    "「识别文字」只对 PDF 有效（当前文件类型：" + type + "）。"
+                    "「识别文字」只对扫描版 PDF 和图片有效（当前文件类型：" + type + "）。"
                             + "其它格式本来就带文字层，直接上传即可被解析。");
         }
 
@@ -139,6 +149,32 @@ public class OcrService {
                 result.engineVersion(),
                 PENDING_TTL.toSeconds(),
                 result.preview());
+    }
+
+    /**
+     * 解析 {@code qa.ocr.recognizable-extensions} 为小写集合。
+     *
+     * <p>用 {@link LinkedHashSet} 而不是 {@code Set.of}：这个顺序会经接口下发给前端，
+     * 将来若要拼成提示话术（"支持 pdf、jpg…"）得稳定可读
+     * （与 {@code DocumentService.validateExtension} 同一套约定）。
+     *
+     * <p>不缓存：这是只在"用户点了一次识别"时才走一次的路径，
+     * 每次重新解析几个字符的成本可以忽略，换来的是"改了配置重启即生效"、
+     * 不必再操心缓存失效。真到了热路径再谈优化。
+     *
+     * @return 可识别扩展名（小写，去空白）
+     */
+    public Set<String> recognizableExtensions() {
+        String raw = properties.getOcr() == null ? null : properties.getOcr().getRecognizableExtensions();
+        if (raw == null || raw.isBlank()) {
+            // 兜底成 pdf：老配置文件里没有这一项时，行为与改动前保持一致，
+            // 不能让"升级了 jar 但没更新 yml"直接变成功能全废。
+            return Set.of("pdf");
+        }
+        return Arrays.stream(raw.split(","))
+                .map(s -> s.trim().toLowerCase(Locale.ROOT))
+                .filter(s -> !s.isEmpty())
+                .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
     /**

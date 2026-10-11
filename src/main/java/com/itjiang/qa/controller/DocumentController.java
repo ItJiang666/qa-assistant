@@ -78,12 +78,16 @@ public class DocumentController {
         data.put("maxPages", properties.getOcr().getMaxPages());
         data.put("dpi", properties.getOcr().getDpi());
         data.put("timeout", properties.getOcr().getTimeout());
+        // 哪些扩展名能点「识别文字」。下发而不是让前端写死：这个判断决定了
+        // 按钮是"出现"还是"永远不出现"，两边各写一份必然走偏 ——
+        // 后端加个格式、前端忘了改，症状是"功能明明有，界面上找不到"。
+        data.put("recognizableExtensions", ocrService.recognizableExtensions());
         data.put("hint", ocrUnavailableHint(availability));
         return ApiResponse.ok(data);
     }
 
     /**
-     * 识别文字（扫描版 PDF）：**只返回预览，不入库**。
+     * 识别文字（扫描版 PDF / 图片）：**只返回预览，不入库**。
      *
      * <p>入库要等用户核对后调 {@code /ocr/confirm}。原因见 {@code OcrService} 的类注释。
      *
@@ -116,10 +120,10 @@ public class DocumentController {
     private String ocrUnavailableHint(OcrEngine.Availability availability) {
         return switch (availability) {
             case READY -> null;
-            case DISABLED -> "本地 OCR 已在配置中关闭（qa.ocr.enabled=false）。扫描件无法识别文字。";
-            case NO_PYTHON -> "未检测到 Python。扫描件识别需要本机安装 Python 3.10+；"
-                    + "不装也不影响其它功能，只是扫描件无法入库。";
-            // 这条 hint 是界面上「本机未启用扫描件文字识别」提示条的正文，
+            case DISABLED -> "本地 OCR 已在配置中关闭（qa.ocr.enabled=false）。扫描件与图片无法识别文字。";
+            case NO_PYTHON -> "未检测到 Python。扫描件与图片的文字识别需要本机安装 Python 3.10+；"
+                    + "不装也不影响其它功能，只是扫描件和图片无法入库。";
+            // 这条 hint 是界面上「本机未启用扫描件与图片的文字识别」提示条的正文，
             // 也是用户唯一的操作指引 —— 所以必须能直接照抄：
             // 命令写全（含 cd）、点明三个包（onnxruntime 尤其容易漏）、说明装完怎么办。
             case NO_DEPENDENCY -> "缺少 OCR 依赖。请在本机执行下面两条命令（需要联网）：\n"

@@ -202,7 +202,7 @@ public class RapidOcrEngine implements OcrEngine {
     }
 
     @Override
-    public OcrResult recognize(Path pdf, Long documentId) {
+    public OcrResult recognize(Path file, Long documentId) {
         Availability availability = availability();
         if (!availability.usable()) {
             throw new OcrException(ErrorCode.OCR_UNAVAILABLE, unavailableMessage(availability));
@@ -214,8 +214,10 @@ public class RapidOcrEngine implements OcrEngine {
         }
 
         QaProperties.Ocr cfg = properties.getOcr();
+        // 位置参数在 Python 侧叫 input_path（PDF 或图片都走它），
+        // 名字与脚本保持一致，免得下次改脚本时两边对不上。
         List<String> command = new ArrayList<>(List.of(
-                python, script.toString(), pdf.toString(),
+                python, script.toString(), file.toString(),
                 "--max-pages", String.valueOf(cfg.getMaxPages()),
                 "--dpi", String.valueOf(cfg.getDpi()),
                 "--min-confidence", String.valueOf(cfg.getMinConfidence())));
@@ -435,8 +437,8 @@ public class RapidOcrEngine implements OcrEngine {
     private String unavailableMessage(Availability availability) {
         return switch (availability) {
             case DISABLED -> "本地 OCR 已被配置关闭（qa.ocr.enabled=false）。";
-            case NO_PYTHON -> "本机未找到 Python，扫描件识别需要 Python 3.10+。"
-                    + "不装也能正常使用其余功能，只是扫描件无法入库。";
+            case NO_PYTHON -> "本机未找到 Python，扫描件与图片的文字识别需要 Python 3.10+。"
+                    + "不装也能正常使用其余功能，只是扫描件和图片无法入库。";
             // 这条文案要能直接照抄执行，所以写清三件事：缺哪些包、在哪执行、装完干什么。
             // 之前只写了一句 `pip install -r deploy/ocr/requirements.txt` —— 相对路径，
             // 用户在任意目录下执行都会失败，而这是界面给出的唯一指引。
