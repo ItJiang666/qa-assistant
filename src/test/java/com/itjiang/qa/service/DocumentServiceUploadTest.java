@@ -75,13 +75,19 @@ class DocumentServiceUploadTest {
         RuntimeModelRegistry registry = mock(RuntimeModelRegistry.class);
         when(registry.embeddingModelName()).thenReturn("test-embed");
 
+        // OcrService 只用于查询"有没有待确认的识别结果"（DocumentDto.ocrPending）。
+        // Mockito 对 boolean 返回类型的默认值是 false，正好是"没有待确认结果"这个正常态，
+        // 不需要额外 stub —— 显式写出来反而会让人以为这里有什么讲究。
+        OcrService ocrService = mock(OcrService.class);
+
         return new DocumentService(
                 mapper,
                 mock(DocumentIngestService.class),
                 mock(VectorStoreService.class),
                 properties,
                 dirs,
-                registry);
+                registry,
+                ocrService);
     }
 
     /**

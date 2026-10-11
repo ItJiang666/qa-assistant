@@ -200,6 +200,14 @@ export interface DocumentItem {
   chunkCount: number
   status: 'PENDING' | 'PARSING' | 'INDEXED' | 'FAILED'
   errorMessage: string | null
+  /**
+   * 是否有一份「已识别完成、等你确认」的 OCR 结果。
+   *
+   * 自动识别成功后文档状态仍然是 FAILED（解析确实失败了），所以**不能只看 status**：
+   * 没有这个字段的话，一份已经识别好、只差点确认的文档会显示成红色的"失败"，
+   * 用户会以为出了问题，进而重复上传或重复点识别。
+   */
+  ocrPending: boolean
   embeddingModel: string
   createdAt: string
   updatedAt: string

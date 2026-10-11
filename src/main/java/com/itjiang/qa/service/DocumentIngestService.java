@@ -1,8 +1,10 @@
 package com.itjiang.qa.service;
 
+import com.itjiang.qa.common.BusinessException;
 import com.itjiang.qa.config.DataDirInitializer;
 import com.itjiang.qa.config.QaProperties;
 import com.itjiang.qa.mapper.DocumentMapper;
+import com.itjiang.qa.model.dto.OcrResult;
 import com.itjiang.qa.model.entity.Document;
 import com.itjiang.qa.model.enums.DocStatus;
 import com.itjiang.qa.provider.RuntimeModelRegistry;
@@ -20,6 +22,7 @@ import dev.langchain4j.model.embedding.EmbeddingModel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
@@ -90,18 +93,39 @@ public class DocumentIngestService {
     private final DataDirInitializer dirs;
     private final RuntimeModelRegistry modelRegistry;
 
+    /**
+     * OCR 编排（用于"解析不出文字时自动识别一次"）。
+     *
+     * <h2>为什么必须加 {@code @Lazy}</h2>
+     * <p>{@code DocumentIngestService} 与 {@code OcrService} 是<b>双向依赖</b>：
+     * <ul>
+     *   <li>本类 → OcrService：解析不出文字时自动跑一次识别（本次新增）</li>
+     *   <li>OcrService → 本类：用户确认后调 {@link #indexText} 把识别文本入库（原有）</li>
+     * </ul>
+     * 构造器注入处理不了这种环，Spring 启动会直接报
+     * {@code Requested bean is currently in creation}。{@code @Lazy} 让这里注入的是
+     * 一个代理，真正的解析推迟到<b>第一次调用自动识别时</b> —— 那时两个 Bean 都已建好。
+     *
+     * <p>更彻底的做法是把"识别"与"入库"拆成两个类，但那样要把 OCR 相关的
+     * 暂存、确认、TTL 状态搬一次家，改动面远大于收益。这里留一条注释说明代价：
+     * <b>环之所以安全，是因为它不在任何一次构造期闭合</b>。
+     */
+    private final OcrService ocrService;
+
     public DocumentIngestService(@Qualifier("qaEmbeddingModel") EmbeddingModel embeddingModel,
                                  VectorStoreService vectorStoreService,
                                  DocumentMapper documentMapper,
                                  QaProperties properties,
                                  DataDirInitializer dirs,
-                                 RuntimeModelRegistry modelRegistry) {
+                                 RuntimeModelRegistry modelRegistry,
+                                 @Lazy OcrService ocrService) {
         this.embeddingModel = embeddingModel;
         this.vectorStoreService = vectorStoreService;
         this.documentMapper = documentMapper;
         this.properties = properties;
         this.dirs = dirs;
         this.modelRegistry = modelRegistry;
+        this.ocrService = ocrService;
     }
 
     /**
@@ -134,8 +158,7 @@ public class DocumentIngestService {
 
             // ── [2] 空文本检查 ────────────────────────────────────────
             if (text == null || text.isBlank()) {
-                markFailed(documentId, NO_TEXT_LAYER_MESSAGE);
-                log.warn("解析结果为空: id={}, file={}", documentId, doc.getFileName());
+                handleNoTextLayer(documentId, doc);
                 return;
             }
 
@@ -156,8 +179,7 @@ public class DocumentIngestService {
             //
             //   这正是开发文档第 9 章「何时拆分 Python」决策树的第一个判断点，
             //   必须给出人能看懂的结论。
-            markFailed(documentId, NO_TEXT_LAYER_MESSAGE);
-            log.warn("文档无文字层（疑似扫描件）: id={}, file={}", documentId, doc.getFileName());
+            handleNoTextLayer(documentId, doc);
 
         } catch (Exception ex) {
             // 兜底：任何未预期异常都要落成 FAILED，否则记录会永远卡在 PARSING，
@@ -165,6 +187,113 @@ public class DocumentIngestService {
             log.error("入库失败: id={}, file={}", documentId, doc.getFileName(), ex);
             markFailed(documentId, shorten(ex.getClass().getSimpleName() + ": " + ex.getMessage()));
         }
+    }
+
+    /**
+     * 处理"这份文件没有文字层"：尽量自动识别，识别不了就留下一句能照做的话。
+     *
+     * <h2>为什么两条路径要合并到这里</h2>
+     * <p>Tika 抽不到文字有<b>两种表现</b>：返回空文本，或直接抛
+     * {@code BlankDocumentException}（实测主要是后者）。原先两处各写一遍处理逻辑，
+     * 措辞已经走偏过一次 —— 一条说"可用「识别文字」"，另一条还停在"需要 OCR，本期不支持"，
+     * 而后者才是用户实际看到的那条。两处合成一处，就不会再有第二份过期的文案。
+     *
+     * <h2>自动识别失败为什么不把文档判死</h2>
+     * <p>OCR 是<b>可选依赖</b>（要 Python）。没装的机器上自动识别必然失败，
+     * 但那不是这份文件的问题 —— 文档仍然是"未入库的扫描件"，
+     * 用户装好依赖后手动点一下就能救回来。所以失败时状态仍落 {@code FAILED}
+     * 并写明原因，与"用户从没点过识别"是同一种状态，不额外制造第三种。
+     *
+     * <p>自动识别<b>成功</b>时状态同样是 {@code FAILED}（因为解析确实失败了），
+     * 但原因文案换成"已识别出 N 字，待确认" —— 界面靠
+     * {@code OcrService.hasPending()} 把这种状态显示成"待确认"而不是红色的"失败"。
+     *
+     * @param documentId 文档 ID
+     * @param doc        文档实体
+     */
+    private void handleNoTextLayer(Long documentId, Document doc) {
+        QaProperties.Ocr cfg = properties.getOcr();
+
+        // 关掉自动识别，或这份文件的格式本来就不该走 OCR（docx 抽不出字是另一类问题）
+        if (cfg == null || !cfg.isAutoRecognize()) {
+            markFailed(documentId, NO_TEXT_LAYER_MESSAGE);
+            log.warn("文档无文字层（自动识别已关闭）: id={}, file={}", documentId, doc.getFileName());
+            return;
+        }
+
+        OcrResult result;
+        try {
+            result = ocrService.recognizeForIngest(doc);
+        } catch (Exception ex) {
+            // 依赖缺失 / 文件损坏 / 超时 —— 都落到"留一句能照做的话 + 保留手动按钮"
+            String reason = ex instanceof BusinessException
+                    ? ex.getMessage()
+                    : shorten(ex.getClass().getSimpleName() + ": " + ex.getMessage());
+            markFailed(documentId, "自动识别未成功：" + reason + "。你也可以手动点「识别文字」重试。");
+            log.warn("自动识别未成功: id={}, file={}, 原因={}", documentId, doc.getFileName(), reason);
+            return;
+        }
+
+        // result 为 null：扩展名不在 qa.ocr.recognizable-extensions 里。
+        // 注意这**不是**错误 —— 比如一份内容损坏的 docx 也会抽不出字，
+        // 那时提示"可用识别文字"是误导，所以给通用文案。
+        if (result == null) {
+            markFailed(documentId, NO_TEXT_LAYER_MESSAGE);
+            log.warn("文档无文字层，且格式不在可识别清单内: id={}, type={}, file={}",
+                    documentId, doc.getFileType(), doc.getFileName());
+            return;
+        }
+
+        // 识别成功但没有可用文字（纯照片、空白页）—— 给出明确结论，
+        // 否则用户看到一个"失败"却不知道为什么，会反复重传同一张图
+        if (result.chars() == 0) {
+            markFailed(documentId, "已自动识别，但这份文件里没有读出任何文字"
+                    + "（可能是纯图片、空白页或字迹过于模糊）。换一张更清晰的图可能有用。");
+            log.warn("自动识别未读出文字: id={}, file={}", documentId, doc.getFileName());
+            return;
+        }
+
+        // auto-confirm 才走这条分支：跳过人工核对，直接把识别文本入库。
+        // 默认关闭，理由见 QaProperties.Ocr#autoConfirm（错字会静默进知识库）。
+        if (cfg.isAutoConfirm()) {
+            indexAutoRecognized(documentId, doc, result);
+            return;
+        }
+
+        ocrService.stash(documentId, result);
+        markFailed(documentId, "已自动识别出 " + result.chars() + " 字，待你确认后入库"
+                + "（识别结果可能有错字，请核对后再确认）");
+        log.info("自动识别完成，等待人工确认: id={}, file={}, {} 字",
+                documentId, doc.getFileName(), result.chars());
+    }
+
+    /**
+     * 自动识别的文本直接入库（仅当 {@code qa.ocr.auto-confirm=true}）。
+     *
+     * <p>留痕与手动确认完全一致（{@code OcrService.describeOrigin} 那套文案的等价物）：
+     * "正文来自本机 OCR"这几个字必须在列表里看得见，否则用户会以为读到的就是原件原文。
+     *
+     * @param documentId 文档 ID
+     * @param doc        文档实体
+     * @param result     识别结果
+     */
+    private void indexAutoRecognized(Long documentId, Document doc, OcrResult result) {
+        try {
+            // 复用与手动确认同一条入库路径（同为 indexText），避免两条路各写一份
+            indexText(documentId, doc, result.text(), "自动OCR");
+        } catch (Exception ex) {
+            // 注意：这里失败的是"入库"而不是"识别"，文案要说准 ——
+            // 否则用户看到"自动识别未成功"会去换文件重传，而真正的问题是向量化那一步
+            log.error("自动识别文本入库失败: id={}", documentId, ex);
+            markFailed(documentId, "自动识别已完成（" + result.chars() + " 字），但入库失败："
+                    + shorten(ex.getMessage()) + "。可手动点「识别文字」重试。");
+            return;
+        }
+
+        documentMapper.updateOriginNote(documentId, "正文来自本机 OCR 自动识别（" + result.engine()
+                + " " + result.engineVersion() + "），非原件文字层；识别结果可能有错字，请以原扫描件为准");
+        log.info("自动识别文本已直接入库（auto-confirm=true）: id={}, file={}, {} 字",
+                documentId, doc.getFileName(), result.chars());
     }
 
     /**

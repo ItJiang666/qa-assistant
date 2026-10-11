@@ -117,6 +117,45 @@ public class QaProperties {
         private String recognizableExtensions = "pdf,jpg,jpeg,png,webp,bmp";
 
         /**
+         * 上传后是否自动跑一次 OCR，省掉"手动点识别文字"这一步。
+         *
+         * <h2>触发条件（很窄，不是每次上传都跑）</h2>
+         * <p>只在<b>两个条件同时满足</b>时才自动识别：
+         * <ol>
+         *   <li>解析出来的文字是空的 —— 也就是扫描件、图片这类没有文字层的文件。
+         *       正常 docx/txt 抽得到文字，压根不走这条。</li>
+         *   <li>扩展名在 {@link #recognizableExtensions} 里。</li>
+         * </ol>
+         * 换句话说：**只对"本来就会解析失败"的文件生效**，正常文档的入库路径一个字都没变。
+         *
+         * <h2>为什么默认开启</h2>
+         * <p>因为不自动识别的话，用户上传一张图会看到"失败"，还得自己意识到
+         * "哦这里有个按钮可以点" —— 这一步对不熟悉系统的人是个坎。
+         * 自动跑完之后仍然<b>停在"待确认"</b>，不会绕过人工核对（见 {@link #autoConfirm} 的说明）。
+         *
+         * <h2>关掉它会发生什么</h2>
+         * <p>回到旧行为：上传后显示"失败" + 原因，用户自己点「识别文字」。
+         * 保留这个开关是因为<b>OCR 是可选依赖</b>：没装 Python 的机器上，
+         * 自动识别会白白失败一次（虽然会优雅降级，但日志里会多一条无意义的失败记录）。
+         */
+        private boolean autoRecognize = true;
+
+        /**
+         * 自动识别完成后，是否<b>跳过人工确认直接入库</b>。
+         *
+         * <h2>默认 false，且不建议改成 true</h2>
+         * <p>OCR <b>一定</b>会有错字。这些错字一旦入库，就会被检索、被引用、被模型当成依据 ——
+         * 而"收拾一份已经混进错误金额的扫描合同"比"点一下确认"麻烦得多。
+         * 实测同一批清晰印刷体里既有全对的（`EQ-2043-A7`、`SN-88231`），
+         * 也有被读坏的（`! d p`、全角 `２00`），而<b>用户无法从界面分辨哪份是哪份</b>。
+         *
+         * <p>所以自动化的边界划在"把字提出来"这一步，<b>不含"决定它能不能进知识库"</b>。
+         * 留这个配置项是为了让"我就是要全自动"这个需求有出口，
+         * 但开启即意味着放弃逐字核对这道闸门 —— 请只在自己的、可承担后果的语料上开。
+         */
+        private boolean autoConfirm = false;
+
+        /**
          * Python 解释器路径。
          *
          * <p>留空则自动探测：先 {@code python3}、再 {@code python}。
@@ -174,6 +213,22 @@ public class QaProperties {
 
         public void setRecognizableExtensions(String recognizableExtensions) {
             this.recognizableExtensions = recognizableExtensions;
+        }
+
+        public boolean isAutoRecognize() {
+            return autoRecognize;
+        }
+
+        public void setAutoRecognize(boolean autoRecognize) {
+            this.autoRecognize = autoRecognize;
+        }
+
+        public boolean isAutoConfirm() {
+            return autoConfirm;
+        }
+
+        public void setAutoConfirm(boolean autoConfirm) {
+            this.autoConfirm = autoConfirm;
         }
 
         public String getPython() {

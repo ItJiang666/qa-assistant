@@ -28,9 +28,18 @@ const ocrRunningId = ref<number | null>(null)
 const ocrPreview = ref<OcrPreview | null>(null)
 const ocrConfirming = ref(false)
 
-/** 入参状态 → 展示用标签色。FAILED 必须一眼可见，所以用 danger 而不是 info。 */
-function statusTag(status: DocumentItem['status']) {
-  switch (status) {
+/**
+ * 状态标签色。
+ *
+ * `ocrPending` 必须排在最前：那种文档的 `status` 是 FAILED（解析确实失败了），
+ * 但后端已经自动识别好、只差用户点确认 —— 显示成红色"失败"会让人以为坏了。
+ * FAILED 用 danger 而不是 info，是因为真失败必须一眼可见。
+ */
+function statusTag(row: DocumentItem) {
+  if (row.ocrPending) {
+    return 'warning'
+  }
+  switch (row.status) {
     case 'INDEXED': return 'success'
     case 'PARSING': return 'warning'
     case 'PENDING': return 'info'
@@ -38,8 +47,11 @@ function statusTag(status: DocumentItem['status']) {
   }
 }
 
-function statusLabel(status: DocumentItem['status']) {
-  switch (status) {
+function statusLabel(row: DocumentItem) {
+  if (row.ocrPending) {
+    return '待确认'
+  }
+  switch (row.status) {
     case 'INDEXED': return '已入库'
     case 'PARSING': return '处理中'
     case 'PENDING': return '排队中'
@@ -88,6 +100,9 @@ function recognizeTooltip(row: DocumentItem): string {
     // 走到这里只剩"解析失败、需要靠 OCR 救回来"的行（见 showRecognizeButton）
     return '该文件没有可提取的文字层，可用「识别文字」在本机 OCR 后入库'
   }
+  if (row.ocrPending) {
+    return '本机已自动识别完成，点一下核对并确认入库'
+  }
   if (row.status === 'INDEXED') {
     return '该文档已入库；如需重新识别，请先删除再重新上传'
   }
@@ -97,13 +112,26 @@ function recognizeTooltip(row: DocumentItem): string {
   if (!ocr.value?.available) {
     return ocr.value?.hint || '本机 OCR 不可用'
   }
+  if (row.status === 'FAILED') {
+    // 上传后会自动识别一次；失败时提示里已经写明原因，
+    // 这里只说明"为什么还要你点一下"——因为上次没成功
+    return '上次自动识别未成功，点这里在本机重试（不联网）'
+  }
   return '在本机识别该文件的文字（不联网），识别完成后需要你确认才会入库'
+}
+
+/** 识别按钮上的文字。待确认时改成「查看识别结果」，因为它其实是打开核对对话框。 */
+function recognizeButtonText(row: DocumentItem): string {
+  if (ocrRunningId.value === row.id) {
+    return '识别中…'
+  }
+  return row.ocrPending ? '查看识别结果' : '识别文字'
 }
 
 /**
  * 这一行要不要显示「识别文字」按钮。
  *
- * <p>判据是"**点了有没有意义**"，而不是"格式是不是图像型"：
+ * 判据是"**点了有没有意义**"，而不是"格式是不是图像型"：
  * ① 格式可识别（扫描版 PDF / 图片）——本来就该给入口；
  * ② 解析失败——文件在库里却用不了，这时哪怕格式不在清单里也要给按钮，
  *    用置灰 + tooltip 告诉他"这份没有文字层，可以试试点这里"，总好过让他对着
@@ -302,8 +330,8 @@ onBeforeUnmount(() => {
         <div class="drop-zone">
           <div class="drop-title">把文件拖到这里，或点击选择</div>
           <div class="drop-sub">
-            扫描版 PDF、图片（jpg / png 等）没有文字层，上传后会解析失败 —— 那是预期行为，
-            在下方表格里点「识别文字」即可在本机识别后入库
+            扫描版 PDF、图片（jpg / png 等）没有文字层，上传后会自动在本机识别一次，
+            状态变为「待确认」时点「查看识别结果」核对后入库
           </div>
         </div>
       </el-upload>
@@ -335,7 +363,7 @@ onBeforeUnmount(() => {
         <el-table-column prop="chunkCount" label="分块" width="80" />
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
-            <el-tag size="small" :type="statusTag(row.status)">{{ statusLabel(row.status) }}</el-tag>
+            <el-tag size="small" :type="statusTag(row)">{{ statusLabel(row) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="失败原因" min-width="240">
@@ -349,6 +377,8 @@ onBeforeUnmount(() => {
             <!--
               按钮的条件见 showRecognizeButton：可识别的格式（扫描版 PDF / 图片）
               一律给入口；解析失败的行也给，因为那正是"下一步该点这里"的场景。
+              文案随状态变（见 recognizeButtonText）：自动识别完成后是「查看识别结果」，
+              因为那时点它其实是打开核对对话框，而不是再识别一遍。
               不可用的原因（未装依赖/已入库/处理中）仍用 tooltip 说明。
             -->
             <el-tooltip
@@ -360,7 +390,7 @@ onBeforeUnmount(() => {
                     :disabled="!canRecognize(row)"
                     :loading="ocrRunningId === row.id"
                     @click="handleRecognize(row)">
-                  {{ ocrRunningId === row.id ? '识别中…' : '识别文字' }}
+                  {{ recognizeButtonText(row) }}
                 </el-button>
               </span>
             </el-tooltip>
@@ -386,7 +416,8 @@ onBeforeUnmount(() => {
           type="success" :closable="false" show-icon class="ocr-alert">
         <template #title>本机 OCR 可用（识别全程在本机完成，不联网）</template>
         <div class="ocr-alert-body">
-          单次最多 {{ ocr.maxPages }} 页、超时 {{ ocr.timeout }}；
+          扫描版 PDF 与图片上传后会<b>自动识别一次</b>，状态变成「待确认」时点
+          「查看识别结果」核对；单次最多 {{ ocr.maxPages }} 页、超时 {{ ocr.timeout }}。
           识别结果需你确认后才会入库。
         </div>
       </el-alert>

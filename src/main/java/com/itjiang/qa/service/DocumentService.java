@@ -61,18 +61,29 @@ public class DocumentService {
     private final DataDirInitializer dirs;
     private final RuntimeModelRegistry modelRegistry;
 
+    /**
+     * 只为查询"这份文档有没有待确认的识别结果"。
+     *
+     * <p>这份状态存在 {@code OcrService} 的内存 Map 里，不落库；而列表接口需要它
+     * 才能把"已识别完、等确认"的行显示成待确认而不是红色的"失败"。
+     * 依赖方向是单向的（DocumentService → OcrService），不构成环。
+     */
+    private final OcrService ocrService;
+
     public DocumentService(DocumentMapper documentMapper,
                            DocumentIngestService ingestService,
                            VectorStoreService vectorStoreService,
                            QaProperties properties,
                            DataDirInitializer dirs,
-                           RuntimeModelRegistry modelRegistry) {
+                           RuntimeModelRegistry modelRegistry,
+                           OcrService ocrService) {
         this.documentMapper = documentMapper;
         this.ingestService = ingestService;
         this.vectorStoreService = vectorStoreService;
         this.properties = properties;
         this.dirs = dirs;
         this.modelRegistry = modelRegistry;
+        this.ocrService = ocrService;
     }
 
     /**
@@ -330,6 +341,11 @@ public class DocumentService {
     /**
      * 实体 → DTO。
      *
+     * <p>{@code ocrPending} 必须在这里现查一次（内存 Map），而不是靠数据库列：
+     * 待确认结果是<b>一次性的中间态</b>，用户不确认就该消失（见 {@code OcrService}），
+     * 落库反而要额外考虑清理。代价是列表接口每行查一次 Map ——
+     * 这是 O(1) 的内存查询，相对于同一次请求里的分页 SQL 可以忽略。
+     *
      * @param document 文档实体
      * @return 文档视图对象
      */
@@ -342,6 +358,7 @@ public class DocumentService {
                 document.getChunkCount(),
                 document.getStatus(),
                 document.getErrorMessage(),
+                ocrService.hasPending(document.getId()),
                 document.getEmbeddingModel(),
                 document.getCreatedAt(),
                 document.getUpdatedAt());

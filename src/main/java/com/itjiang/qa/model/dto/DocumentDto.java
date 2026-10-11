@@ -11,7 +11,8 @@ import java.time.LocalDateTime;
  * @param fileSize      字节数
  * @param chunkCount    分块数（入库完成后才有值）
  * @param status        PENDING / PARSING / INDEXED / FAILED
- * @param errorMessage  失败原因，成功时为 {@code null}
+ * @param errorMessage  失败原因，成功时为 {@code null}；OCR 待确认时写的是提示语
+ * @param ocrPending    是否有一份<b>已识别完成、等用户确认</b>的 OCR 结果在服务端内存里
  * @param embeddingModel 入库时使用的向量模型
  * @param createdAt     上传时间
  * @param updatedAt     最后状态变更时间
@@ -25,6 +26,7 @@ public record DocumentDto(
         Integer chunkCount,
         String status,
         String errorMessage,
+        boolean ocrPending,
         String embeddingModel,
         LocalDateTime createdAt,
         LocalDateTime updatedAt
