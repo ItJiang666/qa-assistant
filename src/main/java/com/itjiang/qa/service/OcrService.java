@@ -119,8 +119,9 @@ public class OcrService {
         }
 
         pendingResults.put(documentId, new Pending(result.text(), Instant.now(), result.engine(), result.engineVersion()));
-        log.info("OCR 识别完成（待确认）: id={}, 文件={}, {}/{} 页, {} 字, 置信度 {}, 耗时 {} ms",
+        log.info("OCR 识别完成（待确认）: id={}, 文件={}, {}/{} 页, 内嵌图 {}/{} 张有字, {} 字, 置信度 {}, 耗时 {} ms",
                 documentId, doc.getFileName(), result.pagesWithText(), result.totalPages(),
+                result.imagesWithText(), result.imageCount(),
                 result.chars(), result.avgConfidence(), result.elapsedMs());
 
         return new OcrPreviewResponse(
@@ -128,6 +129,8 @@ public class OcrService {
                 doc.getFileName(),
                 result.totalPages(),
                 result.pagesWithText(),
+                result.imageCount(),
+                result.imagesWithText(),
                 result.chars(),
                 result.avgConfidence(),
                 result.elapsedMs(),

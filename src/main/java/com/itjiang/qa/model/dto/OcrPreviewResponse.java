@@ -15,6 +15,9 @@ package com.itjiang.qa.model.dto;
  * @param fileName      文件名（前端展示"正在核对哪一份"）
  * @param totalPages    PDF 总页数
  * @param pagesWithText 实际识别出文字的页数
+ * @param imageCount    纳入识别的内嵌图片数（已排除图标/装饰）
+ * @param imagesWithText 其中读出**额外**文字的图片数；为 0 不代表插图里没字
+ *                       （整页渲染已读到的那部分会被去重丢弃）
  * @param chars         识别出的总字数
  * @param avgConfidence 平均置信度；无有效行时为 {@code null}
  * @param elapsedMs     识别耗时
@@ -30,6 +33,8 @@ public record OcrPreviewResponse(
         String fileName,
         int totalPages,
         int pagesWithText,
+        int imageCount,
+        int imagesWithText,
         int chars,
         Double avgConfidence,
         long elapsedMs,

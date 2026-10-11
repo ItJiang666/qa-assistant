@@ -388,6 +388,25 @@ onBeforeUnmount(() => {
           <el-descriptions-item label="平均置信度">
             {{ confidenceText(ocrPreview.avgConfidence) }}
           </el-descriptions-item>
+          <el-descriptions-item label="内嵌插图">
+            <!--
+              只在"确实有插图"时才展示这一项：logo、分隔线那样的小图会被后端按尺寸
+              过滤掉，不进入统计，所以 imageCount=0 是常态而非异常。
+              ⚠️ 措辞刻意避开"图里有字"这种说法：整页渲染本来就能读到插图中的文字，
+              那种情况下图片路径会因为"内容重复"被丢弃，imagesWithText 就是不增加的。
+              写成"图里有字"会让用户以为识别失败，所以这里说"额外文字"。
+            -->
+            <template v-if="ocrPreview.imageCount > 0">
+              发现 {{ ocrPreview.imageCount }} 张
+              <span v-if="ocrPreview.imagesWithText > 0">
+                ，其中 {{ ocrPreview.imagesWithText }} 张读出了额外文字
+              </span>
+              <span v-else class="muted">
+                （其文字已包含在页面识别结果中）
+              </span>
+            </template>
+            <span v-else class="muted">未发现需要单独识别的插图</span>
+          </el-descriptions-item>
           <el-descriptions-item label="引擎">
             {{ ocrPreview.engine }} {{ ocrPreview.engineVersion }}
           </el-descriptions-item>

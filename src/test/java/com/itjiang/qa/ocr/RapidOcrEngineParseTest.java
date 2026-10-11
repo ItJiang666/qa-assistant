@@ -102,8 +102,22 @@ class RapidOcrEngineParseTest {
         assertThat(missingPages.lowQuality()).isTrue();
     }
 
+    @DisplayName("有插图产出文字时，不因页覆盖率低而误报漏页")
+    void lowQualityShouldNotFlagWhenImagesProducedText() {
+        // 1 页里几乎没有文字层、内容全在插图里：pagesWithText 天然很低，
+        // 但识别是成功的（图片路径读到了字），不该报"疑似漏页"。
+        OcrResult fromImage = new OcrResult(1L, "rapidocr", "3.10.0",
+                2, 0, 3, 1, 120, 0.95, 1500L, "preview", "text");
+        assertThat(fromImage.lowQuality()).isFalse();
+
+        // 但有插图却没读出字、页覆盖率又低 → 仍然要提醒
+        OcrResult imageNoText = new OcrResult(1L, "rapidocr", "3.10.0",
+                2, 0, 3, 0, 20, 0.95, 1500L, "preview", "text");
+        assertThat(imageNoText.lowQuality()).isTrue();
+    }
+
     private static OcrResult result(double confidence, int totalPages, int pagesWithText) {
         return new OcrResult(1L, "rapidocr", "3.10.0", totalPages, pagesWithText,
-                100, confidence, 1000L, "preview", "text");
+                0, 0, 100, confidence, 1000L, "preview", "text");
     }
 }

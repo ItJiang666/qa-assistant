@@ -228,6 +228,10 @@ export interface OcrPreview {
   fileName: string
   totalPages: number
   pagesWithText: number
+  /** 纳入识别的内嵌插图数（已排除图标/装饰等小图）。 */
+  imageCount: number
+  /** 其中识别出文字、且有增量内容的插图数。 */
+  imagesWithText: number
   chars: number
   avgConfidence: number | null
   elapsedMs: number

@@ -261,6 +261,10 @@ public class RapidOcrEngine implements OcrEngine {
                     payload.path("engineVersion").asString("unknown"),
                     payload.path("totalPages").asInt(0),
                     payload.path("pagesWithText").asInt(0),
+                    // 内嵌图片统计。旧版脚本不回这两个字段 —— 用 asInt(0) 兜底，
+                    // 使"脚本没升级"退化成旧行为而不是解析失败。
+                    payload.path("imageCount").asInt(0),
+                    payload.path("imagesWithText").asInt(0),
                     payload.path("chars").asInt(0),
                     payload.path("avgConfidence").isNull() ? null : payload.path("avgConfidence").asDouble(),
                     payload.path("elapsedMs").asLong(System.currentTimeMillis() - start),

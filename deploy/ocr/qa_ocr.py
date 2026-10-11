@@ -25,6 +25,16 @@ stdout 里必须出现且只出现一对哨兵，中间是**单行 JSON**：
 用哨兵包裹而不是"假设 stdout 全是 JSON"：第三方库会往 stdout 打日志，
 直接把整段 stdout 当 JSON 解析是迟早会踩的坑。
 
+## 两条识别路径（都产出文本，合并后一起交人工确认）
+
+1. **页面文字**（主流程）：把每页渲染成位图，跑文字检测。
+   扫描件、拍照件走的就是这条。
+2. **内嵌图片里的文字**（补充）：抽取页面中**作为图片插入**的图表、截图、表格照片，
+   各自单独识别。补的是主流程的盲区 —— 文字检测器只会"找字"，
+   它认不出"这块图里有内容"，于是整块跳过。
+
+用 `--detect-images off` 可以关掉第 2 条，回到旧行为。
+
 ## 退出码（Java 侧据此给不同提示，比解析文本可靠）
 
     0  成功
@@ -38,6 +48,7 @@ stdout 里必须出现且只出现一对哨兵，中间是**单行 JSON**：
 用法：
     python qa_ocr.py --check                       # 依赖自检（Java 侧用它判断可用性）
     python qa_ocr.py <pdf路径> [--max-pages 50] [--dpi 200] [--min-confidence 0.5]
+                               [--detect-images on|off] [--max-images 60]
 """
 
 from __future__ import annotations
@@ -154,6 +165,182 @@ def normalize(text: str) -> str:
     return " ".join(text.split())
 
 
+# 内嵌图片的过滤阈值。
+#
+# 为什么必须过滤：PDF 里的"图片"不全是内容 —— 图标、公司 logo、分隔线、
+# 页眉的装饰图形都会以图片对象存在，识别出来只会是一两个噪点字符。
+#
+# ⚠️ 但门槛**不能设高**：小图恰恰是本功能唯一有价值的场景。
+#    实测两轮才定下这两个值：
+#      初版 80px / 40000px² —— 把 150×40（含一行铭牌号）、300×50 这类
+#      "小尺寸但有字"的图全部挡掉了，而整页 200 DPI 渲染对它们又确实读不出来
+#      （放大余量只有 2.78 倍），结果功能形同虚设。
+#      改成 24px / 2000px² 后，真实图标（16×16、32×32 的 logo 与符号）
+#      仍被挡在门外，而"小而有字"的图能进入识别。
+DEFAULT_MIN_IMAGE_SIDE = 24       # 任一边小于此像素 → 判为图标/装饰，跳过
+DEFAULT_MIN_IMAGE_PIXELS = 2000   # 总面积小于此 → 跳过（约 45×45）
+TARGET_RENDER_SIDE = 1500         # 长边小于此的图放大到该尺寸附近，识别更稳
+DEFAULT_MAX_IMAGES = 60           # 单次最多处理多少张内嵌图片（防超大文档跑不完）
+
+# 内嵌图识别出的文字，若与整页识别结果重复到这个比例，就整块丢弃。
+#
+# 这是实测两轮才定下来的判据：
+#   第一轮按"整页字数是否够多"来跳（阈值 50 字）——失败。实测一份文字层页面
+#   整页只读出 48 字，刚好低于阈值，于是同一张截图被识别两遍；而另一轮
+#   200 DPI 的整页渲染其实已把插图文字读得很准（`dpi`/`200`），
+#   逐图放大到 1500px 反而更差（`! d p`/全角 `２00`）。
+#   第二轮改成**按内容比对**：图里识别出的行若大多已出现在整页结果里，
+#   说明这份内容已经有了，再放一遍只会重复并引入错字。
+#
+# 用内容判据而不是字数阈值，是因为"整页读没读到"跟字数没有稳定关系 ——
+# 一页可能只有 40 个字但每个都对，也可能有 300 个字却全是噪点。
+IMAGE_DUP_RATIO = 0.7
+
+
+def render_image(doc, xref, min_side, min_pixels):
+    """把 PDF 内嵌图片渲染成识别用的 PNG 字节。
+
+    <h2>为什么小图要放大</h2>
+    内嵌图片的分辨率差异极大：一张 30000×2000 的长截图直接丢给识别引擎既慢又容易被
+    内部缩放糊掉；一张 150×120 的小图则字太细、检测不到。所以按"长边"归一：
+    长边不足 {@link TARGET_RENDER_SIDE} 的图放大到该尺寸附近，够大的图原样使用。
+
+    <h2>为什么用"临时页重绘"而不是 Pixmap 自己的缩放</h2>
+    PyMuPDF 1.28 的 {@code Pixmap} 没有通用的重采样接口 —— 实测：
+      * {@code pix * Matrix}  → TypeError（Pixmap 不支持与 Matrix 相乘）
+      * {@code pix.warp(Matrix, w, h)} → AttributeError（要求 Quad，不是 Matrix）
+      * {@code pix.warp(Quad(...), w, h)} → ValueError: quad must be convex
+      * {@code pix.shrink(n)}  → 只能整数倍**缩小**，且放大时返回 None
+    最可靠的通用做法是：把图插进一个临时页，再用 {@code get_pixmap(matrix=...)}
+    按任意倍率渲染 —— 这条路径是 MuPDF 自己的渲染器，缩放质量也最好。
+    代价是每张图多一次内存渲染，相对识别本身的耗时可以忽略。
+
+    @param doc        PyMuPDF 文档
+    @param xref       图片对象号
+    @param min_side   任一边小于此像素 → 判为图标/装饰，返回 None
+    @param min_pixels 总面积小于此 → 同样跳过
+    @return PNG 字节，或 None（尺寸不达标 / 读取失败）
+    """
+    import pymupdf
+
+    try:
+        pix = pymupdf.Pixmap(doc, xref)
+        # CMYK / 带 alpha 的图先转成 RGB：识别引擎只吃常规三通道位图
+        if pix.n - pix.alpha >= 4:
+            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+        w, h = pix.width, pix.height
+
+        if min(w, h) < min_side or w * h < min_pixels:
+            return None
+
+        if max(w, h) >= TARGET_RENDER_SIDE:
+            return pix.tobytes("png")
+
+        factor = min(TARGET_RENDER_SIDE / float(max(w, h)), 4.0)
+        tmp = pymupdf.open()
+        try:
+            page = tmp.new_page(width=w, height=h)
+            page.insert_image(pymupdf.Rect(0, 0, w, h), pixmap=pix)
+            out = page.get_pixmap(matrix=pymupdf.Matrix(factor, factor), alpha=False)
+            return out.tobytes("png")
+        finally:
+            tmp.close()
+    except Exception:
+        return None
+
+
+def recognize_bitmap(engine, png_bytes, min_confidence):
+    """对一张位图跑识别，返回 (保留的行列表, 各行的置信度列表)。
+
+    与整页识别共用同一套过滤（置信度阈值 + 噪点判定），
+    保证"页内文字"和"插图文字"的质量标准一致。
+    """
+    try:
+        result = engine(png_bytes)
+    except Exception:
+        return [], []
+    txts = getattr(result, "txts", None)
+    if txts is None:
+        return [], []
+    texts = [str(t) for t in txts]
+    raw_scores = getattr(result, "scores", None)
+    scores = [float(s) for s in raw_scores] if raw_scores is not None else []
+
+    kept, kept_scores = [], []
+    for i, text in enumerate(texts):
+        score = scores[i] if i < len(scores) else 1.0
+        if score < min_confidence:
+            continue
+        normalized = normalize(text)
+        if normalized and not is_noise(normalized):
+            kept.append(normalized)
+            kept_scores.append(score)
+    return kept, kept_scores
+
+
+def extract_page_images(doc, engine, args, page_texts_by_index=None):
+    """抽取内嵌图片并识别其中的文字，**丢掉与整页结果重复的部分**。
+
+    <h2>为什么需要这一步</h2>
+    主流程是"整页渲染 → 文字检测"。实测在 200 DPI 下它通常已经能读出页面上
+    插图里的字；但有两种情况会漏：
+      * 图很小或被缩放过，整页渲染后那部分字太细，检测不到；
+      * 页面主体是模糊扫描件（低对比、倾斜），而插在其中的截图反而清晰。
+    这时按图单独抽出来识别，才能把那部分文字捞回来。
+
+    <h2>为什么要做重复判定（两轮实测的结论）</h2>
+    第一版按"整页字数够多就跳过整页"来避免重复 —— **失败**：实测一页只读出 48 字，
+    低于当时设的 50 阈值，于是同一张截图被识别两遍，其中图那遍还带错字
+    （整页给 `dpi`/`200`，逐图放大后给 `! d p`/全角 `２00`）。
+    改成逐行比对内容：图里识别出的行若大多已出现在该页的整页结果里，整块丢弃。
+    这样"重复"由内容本身判定，不依赖任何字数阈值。
+
+    @param page_texts_by_index 页码 → 该页整页识别文本（用于去重）
+    @return (图片段落列表, 纳入识别的图片数, 其中有文字的图片数, 置信度列表, 去重丢弃数)
+    """
+    page_texts_by_index = page_texts_by_index or {}
+    blocks: list[str] = []
+    confidences: list[float] = []
+    considered = 0
+    with_text = 0
+    duplicates = 0
+
+    for index in range(doc.page_count):
+        if considered >= args.max_images:
+            break
+        try:
+            page = doc.load_page(index)
+            images = page.get_images(full=True)
+        except Exception:
+            continue
+
+        page_text = page_texts_by_index.get(index, "")
+        for seq, info in enumerate(images, start=1):
+            if considered >= args.max_images:
+                break
+            png_bytes = render_image(doc, info[0], args.min_image_side, args.min_image_pixels)
+            if png_bytes is None:
+                continue                       # 尺寸太小，判为图标/装饰
+
+            considered += 1
+            kept, kept_scores = recognize_bitmap(engine, png_bytes, args.min_confidence)
+            if not kept:
+                continue
+
+            # 按内容判重：这一行在整页结果里出现过就算重复。
+            # 用"包含"而不是"相等"——整页结果里同一行可能被切分或带前后缀。
+            fresh = [line for line in kept if line not in page_text]
+            if len(fresh) < max(1, int(len(kept) * (1 - IMAGE_DUP_RATIO))):
+                duplicates += 1
+                continue                       # 增量太小，整块丢弃
+
+            with_text += 1
+            confidences.extend(kept_scores)
+            blocks.append("[第 %d 页·插图 %d]\n%s" % (index + 1, seq, "\n".join(fresh)))
+
+    return blocks, considered, with_text, confidences, duplicates
+
+
 def dedup_repeated_lines(lines: list[str]) -> list[str]:
     """连续重复行只保留一行。
 
@@ -183,6 +370,30 @@ def main() -> int:
     parser.add_argument("--dpi", type=int, default=200, help="拆页渲染 DPI，越高越准也越慢")
     parser.add_argument("--min-confidence", type=float, default=0.5, help="低于此置信度的行丢弃")
     parser.add_argument("--preview-chars", type=int, default=500, help="回给 Java 的预览字数")
+    parser.add_argument(
+        "--detect-images",
+        choices=["on", "off"],
+        default="on",
+        help="是否额外识别页面内嵌图片里的文字（默认 on；用 off 可回到旧行为）",
+    )
+    parser.add_argument(
+        "--min-image-side",
+        type=int,
+        default=DEFAULT_MIN_IMAGE_SIDE,
+        help="内嵌图片任一边小于此像素则跳过（判为图标/装饰）",
+    )
+    parser.add_argument(
+        "--min-image-pixels",
+        type=int,
+        default=DEFAULT_MIN_IMAGE_PIXELS,
+        help="内嵌图片总面积小于此则跳过",
+    )
+    parser.add_argument(
+        "--max-images",
+        type=int,
+        default=DEFAULT_MAX_IMAGES,
+        help="单次最多处理多少张内嵌图片",
+    )
     args = parser.parse_args()
 
     if args.check:
@@ -237,8 +448,9 @@ def main() -> int:
         doc.close()
         return fail(EXIT_INTERNAL, "OCR 引擎初始化失败：%s" % exc)
 
-    # ---- 逐页渲染 + 识别 ----
+    # ---- 逐页渲染 + 识别（主流程：页面上的文字）----
     page_texts: list[str] = []
+    page_texts_by_index: dict[int, str] = {}
     confidences: list[float] = []
     pages_with_text = 0
     try:
@@ -249,46 +461,51 @@ def main() -> int:
             pix = page.get_pixmap(matrix=matrix, alpha=False)
             png_bytes = pix.tobytes("png")
 
-            result = engine(png_bytes)
-            texts = []
-            scores = []
-            txts = getattr(result, "txts", None)
-            if txts is not None:
-                texts = [str(t) for t in txts]
-                raw_scores = getattr(result, "scores", None)
-                if raw_scores is not None:
-                    scores = [float(s) for s in raw_scores]
-
-            kept: list[str] = []
-            for i, text in enumerate(texts):
-                score = scores[i] if i < len(scores) else 1.0
-                if score < args.min_confidence:
-                    continue          # 低置信度宁缺毋滥：错的内容比没有更危险
-                normalized = normalize(text)
-                if normalized and not is_noise(normalized):
-                    kept.append(normalized)
-                    confidences.append(score)
-
+            kept, kept_scores = recognize_bitmap(engine, png_bytes, args.min_confidence)
             if kept:
                 pages_with_text += 1
-                page_texts.append("[第 %d 页]\n%s" % (index + 1, "\n".join(kept)))
+                confidences.extend(kept_scores)
+                joined = "\n".join(kept)
+                page_texts.append("[第 %d 页]\n%s" % (index + 1, joined))
+                page_texts_by_index[index] = joined
     except Exception as exc:
         doc.close()
         return fail(EXIT_INTERNAL, "识别过程中出错：%s" % exc)
-    finally:
-        try:
-            doc.close()
-        except Exception:
-            pass
 
-    merged = "\n".join(page_texts)
+    # ---- 内嵌图片识别（补充：整页渲染没读到的图内文字）----
+    image_blocks: list[str] = []
+    images_considered = 0
+    images_with_text = 0
+    image_duplicates = 0
+    if args.detect_images == "on":
+        try:
+            (image_blocks, images_considered, images_with_text,
+             image_scores, image_duplicates) = extract_page_images(
+                doc, engine, args, page_texts_by_index
+            )
+            confidences.extend(image_scores)
+        except Exception:
+            # 图片识别失败**不能**让整次识别失败：页面文字已经拿到了，
+            # 那才是主要产出。这里静默降级，imageCount=0 即体现。
+            image_blocks, images_considered, images_with_text, image_duplicates = [], 0, 0, 0
+
+    try:
+        doc.close()
+    except Exception:
+        pass
+
+    # 合并顺序：先页面文字、后插图文字。用户核对时是按页读的，
+    # 插图内容跟在其所属文档之后，比穿插进页面中间更好核对。
+    merged = "\n".join(page_texts + image_blocks)
     merged = "\n".join(dedup_repeated_lines(merged.split("\n"))).strip()
 
     if not merged:
         return fail(
             EXIT_EMPTY_RESULT,
-            "未能从该文件中识别出文字（可能是纯图片、空白页，或置信度全部低于阈值）",
+            "未能从该文件中识别出文字"
+            "（可能是纯图片、空白页，或置信度全部低于阈值；也可能图内文字尺寸过小）",
             totalPages=total_pages,
+            imageCount=images_considered,
         )
 
     avg_confidence = round(sum(confidences) / len(confidences), 4) if confidences else None
@@ -299,6 +516,12 @@ def main() -> int:
             "engineVersion": _package_version("rapidocr"),
             "totalPages": total_pages,
             "pagesWithText": pages_with_text,
+            # 内嵌图片的统计：Java 侧用它向用户说明"这张图里有没有字"，
+            # 而不是让用户对着空结果猜是文件问题还是功能没生效。
+            "imageCount": images_considered,
+            "imagesWithText": images_with_text,
+            # 有多少张图识别出的内容与整页结果重复而被丢弃（可用来判断识别行为是否正常）
+            "imageDuplicates": image_duplicates,
             "chars": len(merged),
             "avgConfidence": avg_confidence,
             "elapsedMs": int((time.time() - started) * 1000),
