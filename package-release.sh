@@ -42,6 +42,43 @@ if ! $CHECK_CMD "$JAR" 2>/dev/null | grep -q 'BOOT-INF/classes/static/index.html
 fi
 echo "[OK] 已确认程序包内含前端页面"
 
+# ---------- 2b) 前端资产自检：不缺引用、不留孤儿 ----------
+# 为什么需要：vite 每次构建换文件名（带内容哈希），而 Maven 增量构建**不会清理**
+# target/classes 里的旧文件，于是上一版的 index-xxx.js 会跟着新版本一起进 jar ——
+# 后果不只是体积：旧 bundle 仍可按 URL 访问，等于包里同时存在两个版本的前端。
+# 判据必须是"引用集合 == 实际集合"：只查 index.html 引用的是否存在，抓不到孤儿。
+python3 - "$JAR" <<'PY'
+import re, sys, zipfile
+jar = sys.argv[1]
+pfx = 'BOOT-INF/classes/static/'
+with zipfile.ZipFile(jar) as z:
+    names = z.namelist()
+    if pfx + 'index.html' not in names:
+        print('[X] 包里没有 %sindex.html' % pfx)
+        sys.exit(2)
+    html = z.read(pfx + 'index.html').decode('utf-8', 'replace')
+referenced = sorted(set(re.findall(r'/assets/([^"\' >\s]+)', html)))
+present = sorted(set(n[len(pfx + 'assets/'):] for n in names
+                     if n.startswith(pfx + 'assets/') and not n.endswith('/')))
+missing = [a for a in referenced if a not in present]
+orphan = [a for a in present if a not in referenced]
+print('    引用 %d 个：%s' % (len(referenced), ', '.join(referenced)))
+print('    实际 %d 个：%s' % (len(present), ', '.join(present)))
+if missing:
+    print('[X] index.html 引用了包里不存在的资产：%s' % ', '.join(missing))
+    print('    页面会白屏。执行：cd web && pnpm build && mvn clean package')
+    sys.exit(1)
+if orphan:
+    print('[X] 包里有未被引用的前端资产（旧版本残留）：%s' % ', '.join(orphan))
+    print('    执行：mvn clean package（clean 才会清掉 target/classes 里的旧文件）')
+    sys.exit(1)
+print('[OK] 前端资产干净：引用与实际一一对应，无缺失、无孤儿')
+PY
+if [ $? -ne 0 ]; then
+  echo "[X] 前端资产校验未通过，拒绝出包。"
+  exit 1
+fi
+
 # ---------- 3) 准备临时目录 ----------
 STAGE="release/stage"
 rm -rf release

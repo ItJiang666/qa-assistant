@@ -41,6 +41,19 @@ if not defined UI_FOUND (
     echo     先执行：cd web ^&^& pnpm build   然后重新 mvn clean package
     goto :fail
 )
+rem ---------- 2b) front-end asset self-check (no missing, no orphans) ----------
+rem Why: vite renames bundles every build, and Maven's incremental build does not
+rem clean stale files out of target\classes, so the previous index-xxx.js rides
+rem along into the jar -- the package would then contain two front-ends. The
+rem logic lives in tools\check-ui-assets.ps1 so there is no quote nesting here.
+set "BAD_UI="
+powershell -NoProfile -ExecutionPolicy Bypass -File "tools\check-ui-assets.ps1" "!JAR!"
+if errorlevel 1 set "BAD_UI=1"
+if defined BAD_UI (
+    echo [X] Front-end asset check failed - refusing to package.
+    echo     Fix: run  mvn clean package   then re-run this script.
+    goto :fail
+)
 echo [OK] 已确认程序包内含前端页面
 
 rem ---------- 3) 准备临时目录 ----------
