@@ -2,11 +2,13 @@ package com.itjiang.qa.service;
 
 import com.itjiang.qa.mapper.DocumentMapper;
 import com.itjiang.qa.provider.RuntimeModelRegistry;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * 元问题短路匹配的回归测试。
@@ -20,10 +22,25 @@ import static org.mockito.Mockito.mock;
  */
 class MetaQuestionServiceTest {
 
-    private final MetaQuestionService service = new MetaQuestionService(
-            mock(RuntimeModelRegistry.class),
-            mock(ThinkingModeService.class),
-            mock(DocumentMapper.class));
+    private RuntimeModelRegistry modelRegistry;
+
+    private MetaQuestionService service;
+
+    @BeforeEach
+    void setUp() {
+        // reply() 会读模型名/模式/向量模型来拼文案，裸 mock 会返回 null 并在拼接时 NPE。
+        // 这里给最小可用的桩值：本组测试断言的是"边界说明有没有写进去"，
+        // 不关心具体模型名，但必须让拼接这条路走得通。
+        modelRegistry = mock(RuntimeModelRegistry.class);
+        when(modelRegistry.chatModelName()).thenReturn("test-model");
+        when(modelRegistry.chatMode()).thenReturn(RuntimeModeService.Mode.LOCAL);
+        when(modelRegistry.embeddingModelName()).thenReturn("test-embed");
+
+        service = new MetaQuestionService(
+                modelRegistry,
+                mock(ThinkingModeService.class),
+                mock(DocumentMapper.class));
+    }
 
     @Test
     @DisplayName("典型元问题与冒烟口令都能命中")
@@ -67,5 +84,29 @@ class MetaQuestionServiceTest {
         assertThat(service.match("")).isNull();
         assertThat(service.match("   ")).isNull();
         assertThat(service.match("？")).isNull();
+    }
+
+    @Test
+    @DisplayName("自我介绍要说明'知识库外的问题也能答'，不能自我设限（决策 45）")
+    void shouldDescribeScopeWithoutSelfLimiting() {
+        String identity = service.reply("identity");
+
+        // 旧文案写的是"只依据你上传的文档回答…不拿模型自身知识补充"，
+        // 单看没错，但它把"能不能答知识库以外的问题"这件事含混掉了，
+        // 实测用户据此认为"这个助手只会查资料、别的都不会"。
+        assertThat(identity)
+                .as("要明确知识库以外的问题可以正常回答")
+                .contains("知识库以外的问题")
+                .contains("可以正常回答");
+        assertThat(identity)
+                .as("要说明这类回答会怎么标注，否则用户不知道那句标注是系统行为")
+                .contains("不来自知识库");
+
+        // 能力询问同样不该说成"只能查资料"
+        String capability = service.reply("capability");
+        assertThat(capability)
+                .as("'你能做什么'的回答里要提到通用问答也可以")
+                .contains("常识")
+                .contains("不来自知识库");
     }
 }

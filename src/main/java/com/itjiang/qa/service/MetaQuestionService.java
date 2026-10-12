@@ -182,8 +182,10 @@ public class MetaQuestionService {
         long documents = countDocuments();
 
         StringBuilder out = new StringBuilder();
-        out.append("我是知识库问答助手：只依据你上传的文档回答，并给出引用来源；")
-                .append("资料里没有的会明确说「未找到」，不拿模型自身知识补充。\n");
+        out.append("我是知识库问答助手。知识库问题我只依据你上传的文档回答并给出引用来源，")
+                .append("资料里没有的内部细节会明确说「未找到」，不拿模型自身知识补；")
+                .append("知识库以外的问题（常识、通用知识、闲聊）可以正常回答，")
+                .append("但会标明「不来自知识库、仅供参考」。\n");
 
         if ("model".equals(kind)) {
             out.append("当前对话模型：").append(model)
@@ -203,7 +205,9 @@ public class MetaQuestionService {
                     .append("（jpg / jpeg / png / webp / bmp）；")
                     .append("扫描版 PDF 与图片都没有文字层，上传后可在「文档管理」页点「识别文字」")
                     .append("用本机 OCR 处理，识别结果需你确认才入库；")
-                    .append("可切换本地与云端两种模型来源。\n");
+                    .append("可切换本地与云端两种模型来源；")
+                    .append("常识、通用知识、闲聊这类不涉及知识库的问题也可以直接问，")
+                    .append("只是这类回答会标明不来自知识库。\n");
         } else if ("smoke".equals(kind)) {
             out.append("链路正常。当前对话模型 ").append(model)
                     .append("，向量模型 ").append(embeddingModel)
