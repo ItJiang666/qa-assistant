@@ -37,6 +37,49 @@ import static org.assertj.core.api.Assertions.assertThat;
 class FailureTranslatorTest {
 
     @Test
+    @DisplayName("★ TLS 握手被掐断 → 说清「不是 Key 错」，并给自查命令与两条出路")
+    void sslHandshakeShouldNotBeMistakenForKeyError() {
+        // 实测反馈里的真实卡点：另一台机器上调用 embedding 报
+        // "Runtime exception: javax.net.ssl.SSLHandshakeException: The remote host closed the handshake"，
+        // 而 chat 正常。当时的翻译器只认 ConnectException / UnknownHostException，
+        // 这类异常直接落到兜底分支，用户看到裸异常、不知道该做什么。
+        //
+        // 这里钉住三件事：
+        //   ① 明确排除"Key 填错"这个最容易被误判的方向（Key 错会返回 401，不是掐握手）；
+        //   ② 给一条能自己动手的验证命令；
+        //   ③ 给出两条出路（换厂商 / 切本地），否则读完仍不知道怎么办。
+        Exception ssl = new javax.net.ssl.SSLHandshakeException("The remote host closed the handshake");
+
+        String message = FailureTranslator.message(ssl);
+
+        assertThat(message).isNotNull();
+        assertThat(message)
+                .as("最容易被误判成 Key 问题，必须显式排除")
+                .contains("401");
+        assertThat(message)
+                .as("要能自己验证是不是网络环境问题")
+                .contains("curl");
+        assertThat(message)
+                .as("必须给可照做的出路")
+                .contains("本地").contains("重建索引");
+        assertThat(FailureTranslator.toBusinessException(ssl, "q").getErrorCode())
+                .as("TLS 不可达应归入「下游不可用」，与连不上一致")
+                .isEqualTo(ErrorCode.UPSTREAM_UNAVAILABLE);
+    }
+
+    @Test
+    @DisplayName("SSL 异常包在外层异常里也能识别（真实调用链是多层包装）")
+    void sslHandshakeShouldBeFoundInNestedCause() {
+        Exception nested = new RuntimeException("wrap",
+                new IllegalStateException("inner",
+                        new javax.net.ssl.SSLHandshakeException("The remote host closed the handshake")));
+
+        assertThat(FailureTranslator.message(nested)).contains("握手");
+        assertThat(FailureTranslator.toBusinessException(nested, "q").getErrorCode())
+                .isEqualTo(ErrorCode.UPSTREAM_UNAVAILABLE);
+    }
+
+    @Test
     @DisplayName("Ollama 没启动（连接被拒）→ 直接点名 Ollama，并给出默认端口")
     void connectRefusedShouldNameOllama() {
         String message = FailureTranslator.message(new ConnectException("Connection refused"));

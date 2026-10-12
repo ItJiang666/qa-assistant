@@ -64,6 +64,28 @@ public final class FailureTranslator {
      * @return 提示文案；无法归类时返回 {@code null}
      */
     public static String message(Throwable error) {
+        // ★ TLS 握手失败必须排在 ConnectException 之前判：它俩成因完全不同。
+        //   ConnectException = 连不上（端口/服务没起）；SSLHandshakeException = 连上了、
+        //   但 TLS 协商被对方或中间设备掐断。用户看到的是裸的
+        //   "Runtime exception: javax.net.ssl.SSLHandshakeException: The remote host closed
+        //   the handshake"，完全不知道该做什么 —— 这是实测反馈里的一次真实卡点。
+        if (hasCauseNamed(error, "SSLHandshakeException") || hasCauseNamed(error, "SSLException")) {
+            log.warn("调用模型失败（TLS 握手被中断）: {}", rootMessage(error));
+            return "HTTPS 握手失败（TLS 协商被中断）。这通常不是你填错了 Key —— "
+                    + "Key 不对时厂商会明确回 401，而不是掐断握手。\n"
+                    + "常见原因按可能性排序：\n"
+                    + "  1. 这台机器的网络策略/防火墙/安全软件不允许访问该厂商域名"
+                    + "（校园网、公司内网、部分云主机常见）；\n"
+                    + "  2. 中间有 HTTP 代理或 TLS 拦截设备（抓包、审计类软件），"
+                    + "而它不被 JDK 信任；\n"
+                    + "  3. 厂商域名被 DNS 污染或劫持。\n"
+                    + "可以先这样确认是不是环境问题（把域名换成报错里那个）：\n"
+                    + "  curl -v https://api.siliconflow.cn/v1/models\n"
+                    + "若它同样握手失败，就与程序无关。\n"
+                    + "出路：① 换一个能在本网络访问的厂商（配置里的 qa.cloud.embedding.provider "
+                    + "可改 dashscope 等，注意换向量模型后**必须重建索引**）；"
+                    + "② 或把模型来源切回本地（Ollama），完全不依赖外网。";
+        }
         if (hasCause(error, ConnectException.class) || hasCause(error, UnknownHostException.class)) {
             log.warn("调用模型失败（连接不上）: {}", rootMessage(error));
             return "连接不上模型服务。本地模式请确认 Ollama 已启动（默认 http://localhost:11434）；"
@@ -162,6 +184,11 @@ public final class FailureTranslator {
      * @return 业务码
      */
     private static ErrorCode codeFor(Throwable ex) {
+        // TLS 握手失败也归"下游不可用"：从使用者角度看，服务就是不可达的，
+        // 而它既不是"参数错"也不是"厂商答坏了"。与 message() 的判断顺序保持一致。
+        if (hasCauseNamed(ex, "SSLHandshakeException") || hasCauseNamed(ex, "SSLException")) {
+            return ErrorCode.UPSTREAM_UNAVAILABLE;
+        }
         if (hasCause(ex, ConnectException.class) || hasCause(ex, UnknownHostException.class)) {
             return ErrorCode.UPSTREAM_UNAVAILABLE;
         }
