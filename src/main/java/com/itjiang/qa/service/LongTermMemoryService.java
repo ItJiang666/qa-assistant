@@ -4,6 +4,7 @@ import com.itjiang.qa.common.BusinessException;
 import com.itjiang.qa.common.ErrorCode;
 import com.itjiang.qa.config.QaProperties;
 import com.itjiang.qa.mapper.MemoryMapper;
+import com.itjiang.qa.memory.DeletedMemoryNotice;
 import com.itjiang.qa.model.dto.MemoryDto;
 import com.itjiang.qa.model.entity.Memory;
 import com.itjiang.qa.model.enums.MemoryType;
@@ -46,10 +47,14 @@ public class LongTermMemoryService {
 
     private final MemoryMapper memoryMapper;
     private final QaProperties properties;
+    private final DeletedMemoryNotice deletedNotice;
 
-    public LongTermMemoryService(MemoryMapper memoryMapper, QaProperties properties) {
+    public LongTermMemoryService(MemoryMapper memoryMapper,
+                                 QaProperties properties,
+                                 DeletedMemoryNotice deletedNotice) {
         this.memoryMapper = memoryMapper;
         this.properties = properties;
+        this.deletedNotice = deletedNotice;
     }
 
     /**
@@ -237,13 +242,22 @@ public class LongTermMemoryService {
     /**
      * 删除一条记忆（软删）。
      *
+     * <p><b>同时记一条"作废通知"</b>：光把 L3 行标成 DELETED 是不够的 ——
+     * 用户往往在<b>同一个会话</b>里验证，而会话历史（L2）里模型已经按那条偏好
+     * 回答过若干次，它会继续照做，用户就会认定"删了没用"。
+     * 详见 {@code DeletedMemoryNotice}。
+     *
      * @param userId 用户标识
      * @param id     记忆 ID
      */
     public void delete(String userId, Long id) {
-        requireOwned(userId, id);
+        // 先查出来再删：要拿到 memoryType 才能决定通知措辞
+        Memory existing = requireOwned(userId, id);
         memoryMapper.softDelete(userId, id);
-        log.info("已删除记忆: userId={}, id={}", userId, id);
+        boolean isPreference = MemoryType.PREFERENCE.getValue().equalsIgnoreCase(
+                existing.getMemoryType() == null ? "" : existing.getMemoryType());
+        deletedNotice.record(userId, isPreference, existing.getContent());
+        log.info("已删除记忆: userId={}, id={}, 偏好类={}", userId, id, isPreference);
     }
 
     /**
@@ -260,6 +274,9 @@ public class LongTermMemoryService {
             return 0;
         }
         int deleted = memoryMapper.deleteAllByUser(userId);
+        // 清空也要记通知：用户说"忘掉我"之后，最不能接受的就是模型还照旧行事。
+        // 而且清空是**物理删除**、不留任何痕迹，这通知是唯一的"遗忘信号"。
+        deletedNotice.record(userId, true, null);
         log.warn("已清空用户长期记忆: userId={}, 删除 {} 条", userId, deleted);
         return deleted;
     }

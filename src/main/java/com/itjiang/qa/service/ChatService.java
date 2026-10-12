@@ -10,6 +10,7 @@ import com.itjiang.qa.context.UserContext;
 import com.itjiang.qa.model.dto.ChatRequest;
 import com.itjiang.qa.model.dto.ChatResponse;
 import com.itjiang.qa.model.enums.RunMode;
+import com.itjiang.qa.memory.DeletedMemoryNotice;
 import com.itjiang.qa.rag.RecordingContentRetriever;
 import com.itjiang.qa.rag.SegmentMetadata;
 import dev.langchain4j.data.segment.TextSegment;
@@ -67,18 +68,31 @@ public class ChatService {
     private final MemoryExtractService memoryExtractService;
     private final MetaQuestionService metaQuestionService;
 
+    /**
+     * 刚删除记忆的作废通知。
+     *
+     * <p>加它的直接原因是一次用户反馈："记忆删掉了还是会出现，你的修改没有起作用"。
+     * 查下来长期记忆（L3）确实删干净了（数据库里是 DELETED、memoryCount=0），
+     * 但<b>会话历史（L2）里模型已经按那条偏好回答过若干轮</b>，它只是在延续自己的行为 ——
+     * 删 L3 删不掉 L2。所以删除发生时记一条短时通知，下一轮明确告知该偏好已作废。
+     * 详见 {@link DeletedMemoryNotice}。
+     */
+    private final DeletedMemoryNotice deletedMemoryNotice;
+
     public ChatService(QaAssistant assistant,
                        QaProperties properties,
                        ConversationService conversationService,
                        LongTermMemoryService longTermMemoryService,
                        MemoryExtractService memoryExtractService,
-                       MetaQuestionService metaQuestionService) {
+                       MetaQuestionService metaQuestionService,
+                       DeletedMemoryNotice deletedMemoryNotice) {
         this.assistant = assistant;
         this.properties = properties;
         this.conversationService = conversationService;
         this.longTermMemoryService = longTermMemoryService;
         this.memoryExtractService = memoryExtractService;
         this.metaQuestionService = metaQuestionService;
+        this.deletedMemoryNotice = deletedMemoryNotice;
     }
 
     /**
@@ -148,7 +162,7 @@ public class ChatService {
             // chat(...) 内部，且就在当前线程上（单查询、单检索器的同步路径），
             // 因此 ThreadLocal 覆盖对检索可见。为 null 时表示沿用全局配置。
             RecordingContentRetriever.applyOverrides(request.topK(), request.minScore());
-            answer = assistant.chat(conversationId, composeUserMessage(question, longTermMemory));
+            answer = assistant.chat(conversationId, composeUserMessage(userId, question, longTermMemory));
         } catch (Exception ex) {
             // 异常路径也要清掉检索记录：ThreadLocal 会跟着复用的线程活到下一个请求，
             // 那会导致下一个问题引用到毫不相干的文档，而且随机复现
@@ -268,7 +282,7 @@ public class ChatService {
             // 与同步路径同理：检索在 chatStream(...) 内部、返回流之前同步完成，
             // 所以覆盖参数要在这里设置，拿到流之后立刻清掉
             RecordingContentRetriever.applyOverrides(request.topK(), request.minScore());
-            tokenStream = assistant.chatStream(conversationId, composeUserMessage(question, longTermMemory));
+            tokenStream = assistant.chatStream(conversationId, composeUserMessage(userId, question, longTermMemory));
         } catch (Exception ex) {
             // ★ 关键：检索与首次调用都在返回流之前同步发生，因此这里能拦到
             //   "Key 无效 / 余额不足 / 连不上" 这类一上来就失败的情况。
@@ -356,18 +370,35 @@ public class ChatService {
      * <p>注意落库时保存的仍然是<b>原始问题</b>（见 {@code ask} 与 {@code stream}），
      * 这一段落只在本次请求生效，不会被写进对话历史、也不会污染 L2 记忆。
      *
+     * @param userId         用户标识（用于取"刚删除记忆"的作废通知）
      * @param question       原始问题
      * @param longTermMemory 已拼好的长期记忆段落（可能为"（暂无）"）
      * @return 发给模型的用户消息
      */
-    private String composeUserMessage(String question, String longTermMemory) {
-        if (longTermMemory == null || longTermMemory.isBlank()
-                || LongTermMemoryService.NO_MEMORY.equals(longTermMemory)) {
-            return question;
+    private String composeUserMessage(String userId, String question, String longTermMemory) {
+        StringBuilder sb = new StringBuilder(question);
+
+        if (longTermMemory != null && !longTermMemory.isBlank()
+                && !LongTermMemoryService.NO_MEMORY.equals(longTermMemory)) {
+            sb.append("\n\n【关于你的长期记忆】以下是跨会话记住的、关于你的偏好与背景：\n")
+                    .append(longTermMemory);
         }
-        return question
-                + "\n\n【关于你的长期记忆】以下是跨会话记住的、关于你的偏好与背景：\n"
-                + longTermMemory;
+
+        // ★ 刚删除记忆的作废通知（见 DeletedMemoryNotice）。
+        //
+        //   为什么必须加：删掉 L3 的记忆数据**删不掉 L2 对话历史里已经形成的行为**。
+        //   实测场景 —— 用户在会话里说"每次回答后加个喵~"、模型照做；
+        //   之后用户删掉这条记忆并在**同一个会话**里继续提问，模型仍带"喵~"，
+        //   于是用户认定"记忆删了没用"。而数据库里那条记忆确实是 DELETED，
+        //   问题在于对话历史里模型一直在那么做，它只是延续自己前几轮的行为。
+        //
+        //   放在用户消息里而不是系统提示词：紧挨着本轮问题，约束力更强；
+        //   且只在删除后的短时间窗内出现，不会长期占用上下文。
+        String notice = deletedMemoryNotice.take(userId);
+        if (notice != null) {
+            sb.append(notice);
+        }
+        return sb.toString();
     }
 
     /**
