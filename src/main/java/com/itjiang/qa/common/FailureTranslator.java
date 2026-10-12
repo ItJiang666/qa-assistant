@@ -79,11 +79,13 @@ public final class FailureTranslator {
                     + "  2. 中间有 HTTP 代理或 TLS 拦截设备（抓包、审计类软件），"
                     + "而它不被 JDK 信任；\n"
                     + "  3. 厂商域名被 DNS 污染或劫持。\n"
-                    + "可以先这样确认是不是环境问题（把域名换成报错里那个）：\n"
-                    + "  curl -v https://api.siliconflow.cn/v1/models\n"
+                    + "可以先这样确认是不是环境问题（域名换成报错里那个，"
+                    + "例如 https://api.siliconflow.cn/v1/models 或 "
+                    + "https://dashscope.aliyuncs.com/compatible-mode/v1/models）：\n"
+                    + "  curl -v <那个域名的 /models 地址>\n"
                     + "若它同样握手失败，就与程序无关。\n"
-                    + "出路：① 换一个能在本网络访问的厂商（配置里的 qa.cloud.embedding.provider "
-                    + "可改 dashscope 等，注意换向量模型后**必须重建索引**）；"
+                    + "出路：① 换一个能在本网络访问的厂商（qa.cloud.embedding.provider 可填 "
+                    + "dashscope / siliconflow / zhipu 等，注意换向量模型后**必须重建索引**）；"
                     + "② 或把模型来源切回本地（Ollama），完全不依赖外网。";
         }
         if (hasCause(error, ConnectException.class) || hasCause(error, UnknownHostException.class)) {

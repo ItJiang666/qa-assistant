@@ -72,26 +72,29 @@ qa:
   #       已用真实 .doc 实测通过（4 个分块、正文无乱码）。复杂排版建议改用 .docx。
   # 图片（jpg/jpeg/png/webp/bmp）与上面那些**不是一类**：它们没有文字层，
   # Tika 一个字都提不出来，上传后必然"解析失败"→ 用户再点「识别文字」走本机 OCR。
-  # ⚠️ 改动本项时同步改下面的 qa.ocr.recognizable-extensions，否则会出现
+  #  改动本项时同步改下面的 qa.ocr.recognizable-extensions，否则会出现
   #    "能上传但识别按钮永远置灰"的死角。
   allowed-extensions: txt,md,docx,doc,pdf,xlsx,html,jpg,jpeg,png,webp,bmp
 
   # ===========================================================================
   # 云端模型（P4）
   # ===========================================================================
-  # ⚠️ 为什么这些配置放在本文件，而不是 application-cloud.yml：
+  #  为什么这些配置放在本文件，而不是 application-cloud.yml：
   #    profile 只占"数据源"那条轴（决策 15）；模型来源由 qa.mode + 界面上的运行时开关决定。
   #    若把云端配置放进 cloud 专属 profile 文件，那么"用默认 h2,local 启动、再在界面上
   #    切到云端"这条最常见的路径就读不到这些配置 —— 症状是配了模型名却被忽略。
   #    所以：**云端配置必须放在任何 profile 都会加载的文件里**。
   #
   # 默认组合：对话 DeepSeek + 向量阿里百炼（两者都经官方文档逐项核对，见 presets 注释）
+  # ⚠️ 向量的默认厂商在 2026-10-12 从 siliconflow 改成了 dashscope，理由见下方 embedding 段注释
+  #    （可达性：某些网络访问不了 api.siliconflow.cn）。云端模式因此只需要两个 Key：
+  #    DEEPSEEK_API_KEY（对话）+ DASHSCOPE_API_KEY（向量）。
   cloud:
     chat:
       # 厂商预设 id，见下方 presets
       provider: deepseek
       # 留空则取预设的第一个模型；显式填了以填的为准
-      # ⚠️ deepseek-chat / deepseek-reasoner 已于 2026-07-24 停止服务，勿再使用
+      #  deepseek-chat / deepseek-reasoner 已于 2026-07-24 停止服务，勿再使用
       model: deepseek-flash
       timeout: 60s
       # 云端比本地多一次重试：429 限流重试一下往往就好了
@@ -99,7 +102,7 @@ qa:
       max-output-tokens: 2048
       # 思考模式默认值：true = 开（推荐），false = 关。
       #
-      # ⚠️ 2026-10-10 实测把这里的默认从 false 改成了 true，依据是下面这组对照
+      #  2026-10-10 实测把这里的默认从 false 改成了 true，依据是下面这组对照
       #    （同一份 Prompt：1342 字系统提示词 + 2066 字检索资料，正确片段排在第 3 位，各跑 3 次）：
       #      flash + 关思考 → 0/3 答对，约 1.0 s
       #      flash + 开思考 → 3/3 答对，约 2.1 s（思考约 700 字）
@@ -120,17 +123,28 @@ qa:
       # custom-parameters:
       #   reasoning_effort: none
     embedding:
-      provider: siliconflow
-      model: Qwen/Qwen3-Embedding-4B
-      # ⚠️ 实测值，不是厂商默认值（官方文档未标注默认维度，我们实测定为 2560）：
-      #    不传 dimensions 时返回 2560；显式写出来是为了防止上游悄悄改默认值。
-      # ⚠️ 它与本地 qa-embed:4b 的向量**不完全相同**：同一文本两边余弦 0.988，
-      #    而不同文本之间只有 0.29 —— 同源（同一份权重）但受量化与推理实现影响。
-      #    所以"维度相同"不等于"可以混用"：换向量来源后仍应重建索引，
-      #    否则分数会被系统性压低约 1.2%（不报错，只是悄悄变差）。
-      dimension: 2560
+      #  2026-10-12 从 siliconflow 换成 dashscope。理由如下，别轻易改回去。
+      #
+      # 换的理由（另一台机器上的实测反馈）：api.siliconflow.cn 的 **TLS 握手被中间网络掐断**
+      # （SSLHandshakeException: The remote host closed the handshake），而 api.deepseek.com 正常。
+      # 症状是"能聊天，但一上传文件就失败"—— 因为解析→分块之后必须调 embedding 做向量化，
+      # 那一步不通，整条入库就失败。这类网络限制在校园网/公司内网/部分云主机上很常见，
+      # 用户自己改不了，所以默认值应该选可达性更稳的那家：阿里云百炼。
+      #
+      #  代价必须知道：维度从 2560 变成 1024（text-embedding-v4 实测维度），
+      #    与本地 qa-embed:4b（2560）**不再是同源同维**，
+      #    因此「本地 ↔ 云端」互切时**必须重建索引**
+      #    （不重建会明确报"向量索引与当前向量模型不匹配"，不会静默出错）。
+      # 想要"免重建"的 2560 维方案，仍可换回 siliconflow（+ SILICONFLOW_API_KEY），
+      # 前提是那台机器能访问 api.siliconflow.cn。
+      provider: dashscope
+      model: text-embedding-v4
+      #  实测值，不是厂商默认值（官方文档未标注各模型默认维度，我们实测定为 1024）：
+      #    不传 dimensions 时返回 1024；显式写出来是为了防止上游悄悄改默认值。
+      #   换 embedding 模型时必须同步改这一行。
+      dimension: 1024
       # 云端向量接口单次提交条数。
-      # ⚠️ 实测：配 16 时入库直接 400 —— 百炼 text-embedding-v4 单次最多 10 条：
+      #  实测：配 16 时入库直接 400 —— 百炼 text-embedding-v4 单次最多 10 条：
       #    InvalidParameter: batch size is invalid, it should not be larger than 10.
       # 各厂商上限写在预设的 embedding-max-batch 里，实际取"配置值与上限的较小者"，
       # 所以这里可以按需调大（换到上限更高的厂商时），不会越界。

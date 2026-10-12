@@ -277,8 +277,15 @@ python -c "import sys, rapidocr, onnxruntime, pymupdf; print('OCR 依赖就绪')
 set QA_PROFILES=h2,local
 set QA_MODE=cloud
 set DEEPSEEK_API_KEY=sk-xxx        # 对话
-set SILICONFLOW_API_KEY=sk-xxx     # 向量
+set DASHSCOPE_API_KEY=sk-xxx       # 向量（阿里云百炼）
 ```
+
+> **两个 Key 都要填。** 只填对话 Key 的症状很有迷惑性：**能聊天，但一上传文件就"解析失败"** ——
+> 解析本身没问题，卡在分块之后的 embedding，那一步失败整条入库都会失败。
+> 向量也可以换成硅基流动（`qa.cloud.embedding.provider: siliconflow`，2560 维，
+> 与本地同源、切换免重建索引），但**前提是那台机器能访问 `api.siliconflow.cn`**：
+> 有网络（校园网 / 公司内网 / 带 TLS 拦截的出口）会在握手阶段被掐断，
+> 报 `SSLHandshakeException`，换 Key 解决不了，只能换厂商或改用本地模型。
 
 `.env` 已被 `.gitignore` 排除，**永远不会被提交**。界面上只显示"已配置 / 未配置"，
 不回显内容；`/api/v1/system/status` 也只回**末四位掩码**（如 `***c747`），
@@ -313,8 +320,8 @@ set SILICONFLOW_API_KEY=sk-xxx     # 向量
 | 厂商 | provider | 对话 | 向量        | 注意事项 |
 |---|---|----|-----------|---|
 | DeepSeek（深度求索） | `deepseek` | 支持 | 不支持       | 无 embedding 接口；`deepseek-chat` / `deepseek-reasoner` 已停用，现役 `deepseek-flash` |
-| 阿里云百炼 | `dashscope` | 支持 | 支持 1024 维 | Key 与地域绑定，跨地域报 401；单次最多 10 条 |
-| 硅基流动 | `siliconflow` | 支持 | 支持 2560 维 | 官方未标注默认维度，必须显式配 `dimension` |
+| 阿里云百炼 | `dashscope` | 支持 | 支持 1024 维 | **默认向量源**（可达性最稳）；Key 与地域绑定，跨地域报 401；单次最多 10 条 |
+| 硅基流动 | `siliconflow` | 支持 | 支持 2560 维 | 官方未标注默认维度，必须显式配 `dimension`；⚠️ 部分网络访问 `api.siliconflow.cn` 会在 TLS 握手阶段被掐断（报 `SSLHandshakeException`），换 Key 无效 |
 | 智谱 BigModel（GLM） | `zhipu` | 支持 | 支持 2048 维 | base-url 是 `/api/paas/v4`，**不是** `/v1` |
 | 月之暗面 Kimi | `kimi` | 支持 | 不支持       | 无 embedding；`moonshot-v1-*` 已下线 |
 | 火山方舟（豆包） | `ark` | 支持 | 不支持       | embedding **不走 OpenAI 协议**，必须用方舟 SDK |
@@ -392,6 +399,8 @@ package-release.cmd            # Windows
 | 回答偶尔"资料里明明有却说找不到" | 点「系统状态」看**思考模式**是否被关了。实测关掉思考会把资料里确实存在的答案答成"未找到"（本地/云端模型差异见设计文档 7. 关键实测数据）；把开关打开即可                                                                                         |
 | 提示"模型服务拒绝了当前 API Key（401）" | Key 不对/过期，或与端点地域不匹配（百炼的 Key 与地域绑定）。改 `.env` 后**必须重启应用**，再到「系统状态」点自检确认                                                                                                     |
 | 提示"云端账户余额不足或额度已用尽（402）" | 去厂商控制台充值，或先在「模型来源」里切回本地模型                                                                                                                                                 |
+| **能聊天，但一上传文件就"解析失败"** | 十有八九是**向量那侧的 Key 没配或连不上**：解析、分块都正常，卡在分块之后的 embedding，那一步失败整条入库都会失败。先看"失败原因"那一列 —— 提示缺 Key 就去 `.env` 补齐（默认组合要 `DEEPSEEK_API_KEY` + `DASHSCOPE_API_KEY` 两把），提示 `SSLHandshakeException` 见下一条 |
+| 失败原因里写着 `javax.net.ssl.SSLHandshakeException: The remote host closed the handshake` | **不是 Key 的问题**（Key 不存在报"缺少…"、Key 错了报 401，各有各的文案），而是 **TLS 握手被中间网络掐断** —— 常见于校园网、公司内网、带 HTTPS 拦截代理的出口，自己改不了。换 Key、重填 `.env` 都不会有任何改善。两条出路：① **换一家向量厂商**（默认已是可达性最稳的百炼；若你手动改成了硅基流动，改回 `qa.cloud.embedding.provider: dashscope` 即可，**换完必须重建索引**）；② **改用本地模型**（`QA_MODE=local`，完全不联网） |
 | 上传的扫描版 PDF 检索不到内容 | 先看状态标签：显示**「待确认」**说明本机已自动识别好了，点「查看识别结果」核对后确认入库即可。显示**「失败」**才需要处理 —— 看"失败原因"那一列写的是什么（多半是没装 OCR 依赖，四步安装见上方「扫描版 PDF 与图片的文字识别」） |
 | 回答里混进了知识库没有的内容（尤其是数字、版本号） | **已知短板，且提示词拦不住**。当检索到的片段"话题相关、但恰好不含那个具体事实"时，模型会用自己的训练知识补上，还标着出处。实测：资料里有答案的提问 8/8 全对、资料完全没这话题 6/6 如实说"未找到"，只有这中间地带会编。**处理**：点开「引用来源」核对原文；涉及数字/编号/版本的结论务必核对。想减少诱因可把 `qa.retrieval.top-k` 降到 4、`qa.retrieval.min-score` 提到 0.80+（代价是可能漏掉本该命中的片段） |
 | 删掉了记忆，回答还是老样子 | **删除只清掉"跨会话记住的偏好"，清不掉当前会话里已经形成的习惯。**同一条会话中模型已经按那个偏好回答过多轮，它会继续延续（那是对话历史，不是记忆）。系统的处理：删除后会提示模型别再沿用，并有规则保证**从下一轮起回到默认风格**（实测 10/10 生效）。想彻底干净就**开一个新会话**——新会话不带旧历史，行为一定回到默认 |
