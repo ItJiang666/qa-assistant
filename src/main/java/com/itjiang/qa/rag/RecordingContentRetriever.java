@@ -4,6 +4,7 @@ import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.rag.content.Content;
+import dev.langchain4j.rag.content.ContentMetadata;
 import dev.langchain4j.rag.content.retriever.ContentRetriever;
 import dev.langchain4j.rag.content.retriever.EmbeddingStoreContentRetriever;
 import dev.langchain4j.rag.query.Query;
@@ -83,17 +84,42 @@ public class RecordingContentRetriever implements ContentRetriever {
     /** 查询改写器；为 {@code null} 时退化为单路检索。 */
     private final QueryExpander queryExpander;
 
+    /** 字面检索用的片段目录；为 {@code null} 时不做字面检索。 */
+    private final SegmentCatalog segmentCatalog;
+
+    /** 字面检索是否启用。 */
+    private final boolean literalSearchEnabled;
+
+    /** 字面检索最多补进几条候选。 */
+    private final int literalMaxResults;
+
+    /** 相对兜底是否启用（绝对阈值放行 0 条时，允许"明显胜出"的候选进来）。 */
+    private final boolean relativeFallbackEnabled;
+
+    /** 相对兜底的比值门槛：top1 / top2 达到它才认为"有明显赢家"。 */
+    private final double relativeFallbackRatio;
+
     public RecordingContentRetriever(EmbeddingStore<TextSegment> embeddingStore,
                                      EmbeddingModel embeddingModel,
                                      int defaultTopK,
                                      double defaultMinScore,
-                                     QueryExpander queryExpander) {
+                                     QueryExpander queryExpander,
+                                     SegmentCatalog segmentCatalog,
+                                     boolean literalSearchEnabled,
+                                     int literalMaxResults,
+                                     boolean relativeFallbackEnabled,
+                                     double relativeFallbackRatio) {
         this.embeddingStore = embeddingStore;
         this.embeddingModel = embeddingModel;
         this.defaultTopK = defaultTopK;
         this.defaultMinScore = defaultMinScore;
         this.defaultRetriever = build(defaultTopK, defaultMinScore);
         this.queryExpander = queryExpander;
+        this.segmentCatalog = segmentCatalog;
+        this.literalSearchEnabled = literalSearchEnabled;
+        this.literalMaxResults = literalMaxResults;
+        this.relativeFallbackEnabled = relativeFallbackEnabled;
+        this.relativeFallbackRatio = relativeFallbackRatio;
     }
 
     /**
@@ -122,7 +148,51 @@ public class RecordingContentRetriever implements ContentRetriever {
 
     @Override
     public List<Content> retrieve(Query query) {
-        List<Content> contents = retrieveWithExpansion(query);
+        // ① 向量检索（原路径，一个字没改）：框架传入的 Query 带着上层过滤条件
+        List<Content> vectorHits = retrieveWithExpansion(query);
+
+        // ② 字面引用检索（补充通道）：问"1.3 内容是什么"这类**位置型**提问时，
+        //    向量检索天生失效（1.3 在向量空间里没有语义），而字面匹配一次就能定位。
+        //    实测：含答案的分块向量排名 #21 / 分数 0.2991，字面命中却精确落在答案上。
+        List<Content> selected = new ArrayList<>(vectorHits == null ? List.of() : vectorHits);
+        int vectorCount = selected.size();
+        if (literalSearchEnabled && segmentCatalog != null) {
+            LiteralQueryMatcher matcher = LiteralQueryMatcher.from(query.text());
+            if (!matcher.isEmpty()) {
+                List<Content> literal = segmentCatalog.findByLiteral(matcher, literalMaxResults).stream()
+                        .map(Content::from)
+                        .toList();
+                for (Content content : literal) {
+                    // 去重：字面命中的片段可能已经在向量结果里（那就保留向量那条，分数更高）
+                    boolean duplicate = selected.stream().anyMatch(existing ->
+                            existing.textSegment() != null && content.textSegment() != null
+                                    && existing.textSegment().text().equals(content.textSegment().text()));
+                    if (!duplicate) {
+                        selected.add(content);
+                    }
+                }
+                if (!literal.isEmpty()) {
+                    log.debug("字面引用检索命中 {} 条（引用={}），向量命中 {} 条",
+                            literal.size(), matcher.keys(), vectorCount);
+                }
+            }
+        }
+
+        // ③ 相对兜底：一条都没选出来时，看有没有"明显胜出"的候选。
+        //
+        //    为什么需要：绝对阈值 0.65 对**内部高度同质**的文档会整体误杀。
+        //    实测同一份文档 7 个"答案确实在库里"的问题只有 3 个能过 0.65 ——
+        //    D企业面临什么问题 0.6405、论文的启示是什么 0.4584、1.3 国内外研究现状 0.4372，
+        //    全被挡在外面。而它们的 top1/top2 比值明显高于纯噪声提问。
+        //    所以第二道判据不看"分数多高"，看"有没有明显赢家"。
+        //    实测中它已经起过作用：问"1.3内容是什么"时靠它放进了候选，
+        //    否则模型连"资料里都有哪些章节号"都看不到，只能回一句"未找到"。
+        int fallbackAdded = 0;
+        if (relativeFallbackEnabled && selected.isEmpty()) {
+            List<Content> rescued = applyRelativeFallback(query);
+            selected.addAll(rescued);
+            fallbackAdded = rescued.size();
+        }
 
         // ★ 检索为空时注入一条"占位资料"，这一步是防幻觉的关键。
         //
@@ -135,13 +205,79 @@ public class RecordingContentRetriever implements ContentRetriever {
         //   "北京是中华人民共和国的首都……"；修复后如实回答"现有资料中未找到相关信息"。
         //
         //   占位符会被 toSources() 过滤掉，不会作为"引用来源"出现在响应里。
-        List<Content> effective = (contents == null || contents.isEmpty())
+        List<Content> effective = selected.isEmpty()
                 ? List.of(noContentPlaceholder())
-                : contents;
+                : selected;
 
         LAST_RETRIEVAL.set(effective);
-        logRetrieval(query, contents, effective);
+        logRetrieval(query, vectorHits, effective);
+        if (fallbackAdded > 0) {
+            log.info("相对兜底放行 {} 条候选（绝对阈值一条都没达标）: query='{}'", fallbackAdded, query.text());
+        }
         return effective;
+    }
+
+    /**
+     * 相对兜底：绝对阈值一条都没放行时，用"是否明显胜出"再判一次。
+     *
+     * <h2>判据为什么是 top1/top2（改阈值前请先复测）</h2>
+     * <p>实测比值能把两类分开：
+     * <pre>
+     *   域外问题（北京是哪个国家的首都）  1.29   ← 但绝对分只有 0.22，被下面的下限挡住
+     *   本领域有效（1.3 国内外研究现状）   1.24   ← 有明确赢家，应放行
+     *   本领域有效（双十一订单量）        1.03
+     *   纯位置问句（1.3内容是什么）       1.06   ← 没有赢家，说明库里真没匹配
+     * </pre>
+     *
+     * <h2>为什么还要一条绝对下限</h2>
+     * <p>域外问题的比值有时更高（1.29），只靠比值会把纯噪声放进来。
+     * 下限取 {@code minScore * 0.5}：实测有效候选都在 0.43 以上，
+     * 而域外问题只有 0.17~0.29，这条下限正好把它们挡住。
+     *
+     * @param query 原始查询
+     * @return 放行的候选；判据不成立时返回空列表
+     */
+    private List<Content> applyRelativeFallback(Query query) {
+        try {
+            ContentRetriever fallback = build(effectiveTopK(), 0.0);
+            List<Content> candidates = fallback.retrieve(query);
+            if (candidates == null || candidates.size() < 2) {
+                return List.of();
+            }
+            double top1 = scoreOf(candidates.get(0));
+            double top2 = scoreOf(candidates.get(1));
+            double floor = effectiveMinScore() * 0.5;
+            if (top2 <= 0 || top1 < floor) {
+                return List.of();
+            }
+            double ratio = top1 / top2;
+            if (ratio < relativeFallbackRatio) {
+                log.debug("相对兜底未触发: top1={}, top2={}, 比值={} < {}",
+                        String.format("%.4f", top1), String.format("%.4f", top2),
+                        String.format("%.2f", ratio), relativeFallbackRatio);
+                return List.of();
+            }
+            int keep = Math.min(3, candidates.size());
+            log.info("相对兜底命中: top1={}, top2={}, 比值={}，放行前 {} 条",
+                    String.format("%.4f", top1), String.format("%.4f", top2),
+                    String.format("%.2f", ratio), keep);
+            return new ArrayList<>(candidates.subList(0, keep));
+        } catch (Exception ex) {
+            // 兜底本身失败绝不能影响检索：它只是"多救一次"的尝试
+            log.warn("相对兜底失败，维持原结果: {}", ex.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * 取一条检索结果的相似度分数。
+     *
+     * @param content 结果
+     * @return 分数；缺失时返回 0
+     */
+    private double scoreOf(Content content) {
+        Object raw = content.metadata().get(ContentMetadata.SCORE);
+        return raw instanceof Number number ? number.doubleValue() : 0.0;
     }
 
     /**

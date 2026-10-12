@@ -2,6 +2,7 @@ package com.itjiang.qa.config;
 
 import com.itjiang.qa.rag.QueryExpander;
 import com.itjiang.qa.rag.RecordingContentRetriever;
+import com.itjiang.qa.rag.SegmentCatalog;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.embedding.EmbeddingModel;
@@ -58,27 +59,41 @@ public class RagConfig {
      * 再多路检索、轮转合并。改写器用问答模型（不是抽取模型 —— 后者带 JSON 模式，
      * 会把改写结果变成 JSON，反而解析不了）。
      *
-     * @param store      向量库
-     * @param model      向量模型
-     * @param properties 应用配置（topK / minScore / 查询改写开关）
-     * @param chatModel  改写用的对话模型（与回答同一个模型来源）
-     * @return 带记录能力与查询改写的检索器
+     * @param store          向量库
+     * @param model          向量模型
+     * @param properties     应用配置（topK / minScore / 查询改写 / 字面检索 / 相对兜底）
+     * @param queryExpander  改写用的对话模型（与回答同一个模型来源）
+     * @param segmentCatalog 字面检索用的片段目录（见 {@link com.itjiang.qa.rag.SegmentCatalog}）
+     * @return 带记录能力、查询改写、字面检索与相对兜底的检索器
      */
     @Bean("qaContentRetriever")
     public ContentRetriever qaContentRetriever(EmbeddingStore<TextSegment> store,
                                                @Qualifier("qaEmbeddingModel") EmbeddingModel model,
                                                QaProperties properties,
-                                               QueryExpander queryExpander) {
-        int topK = properties.getRetrieval().getTopK();
-        double minScore = properties.getRetrieval().getMinScore();
-        QaProperties.Retrieval.QueryExpansion expansion = properties.getRetrieval().getQueryExpansion();
+                                               QueryExpander queryExpander,
+                                               SegmentCatalog segmentCatalog) {
+        QaProperties.Retrieval retrieval = properties.getRetrieval();
+        int topK = retrieval.getTopK();
+        double minScore = retrieval.getMinScore();
+        QaProperties.Retrieval.QueryExpansion expansion = retrieval.getQueryExpansion();
         log.info("检索器就绪: topK={}, minScore={}, 查询改写={}{}（低于阈值的结果不会交给模型）",
                 topK, minScore, expansion.isEnabled() ? "开" : "关",
                 expansion.isEnabled() ? "（额外 " + expansion.getExtraQueries() + " 条改写式）" : "");
+        log.info("补充通道: 字面引用检索={}{}, 相对兜底={}{}",
+                retrieval.isLiteralSearch() ? "开" : "关",
+                retrieval.isLiteralSearch() ? "（最多 " + retrieval.getLiteralMaxResults() + " 条）" : "",
+                retrieval.isRelativeFallback() ? "开" : "关",
+                retrieval.isRelativeFallback()
+                        ? "（top1/top2 ≥ " + retrieval.getRelativeFallbackRatio() + " 时放行）" : "");
 
         // 把向量库与向量模型直接交给装饰器：请求级覆盖（ChatRequest.topK/minScore）
         // 需要按新参数临时另建检索器，因此它必须自己持有这两个依赖
-        return new RecordingContentRetriever(store, model, topK, minScore, queryExpander);
+        return new RecordingContentRetriever(store, model, topK, minScore, queryExpander,
+                segmentCatalog,
+                retrieval.isLiteralSearch(),
+                retrieval.getLiteralMaxResults(),
+                retrieval.isRelativeFallback(),
+                retrieval.getRelativeFallbackRatio());
     }
 
     /**

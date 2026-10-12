@@ -577,8 +577,73 @@ public class QaProperties {
          * <p>实测分数分布里"话题相关但不含答案"是 0.81~0.89，比"真正含答案"的
          * 0.83~0.89 还要高一点 —— <b>两者重叠</b>，所以任何阈值都切不掉这一类。
          * 别指望靠调它解决幻觉；它只能挡住"完全无关"的那一批。
+         *
+         * <h2>v1.29 用当前向量模型（text-embedding-v4）复测的分布</h2>
+         * <p>38 页扫描件 / 49 个分块：
+         * <pre>
+         *   本领域·答案在库里（9 问）                    0.67 ~ 0.89   全部 ≥0.65
+         *   域外（首都 / 天气 / 红烧肉）                  0.59 ~ 0.64   全部 &lt;0.65
+         *   其中"章节号型"提问（1.3内容是什么）的 top1   0.6894
+         * </pre>
+         * 结论不变：<b>0.65 在这份语料上恰好把两类分开</b>。
+         * 但要注意那个"章节号型"提问虽然过了阈值，<b>真正含答案的分块却排在第 21 名</b> ——
+         * 那是**排序问题不是阈值问题**，靠调这个参数永远解决不了，
+         * 得用 {@link Retrieval#literalSearch} 那条字面通道。
          */
         private double minScore = 0.65;
+
+        /**
+         * 是否启用"字面引用检索"这条补充通道（默认开）。
+         *
+         * <h2>它解决的是向量检索天生做不到的一类问题 —— 实测这就是本次修复的来源</h2>
+         * 用户问「1.3 内容是什么」时，{@code 1.3} 在向量空间里<b>几乎没有语义</b> ——
+         * 它是"位置信息"（文档的第几节），不是"意思"。而真正含 1.3 正文的那个分块
+         * 向量排名第 21，进不了 topK=10，于是模型只看得到目录里那一行。
+         *
+         * <p>三条通道的分离对照（同一份 38 页扫描件、49 个分块）：
+         * <pre>
+         *   两条通道都关  → 答"资料片段中只出现了目录条目 1.3 国内外研究现状" ❌
+         *   只开字面通道  → 答出 1.3.1 国内 / 1.3.2 国外的正文内容            ✅
+         *   两条都开      → 同上（说明相对兜底没参与）
+         * </pre>
+         *
+         * <p>这是<b>加一条通道，不是替换向量检索</b>：向量那一路完全不动。
+         * 风险很低 —— 它只认形式明确的引用（章节号 / 引号内原文），
+         * 命中本身就构成"这个分块里真的出现了你引用的字符串"这一相关性证据。
+         */
+        private boolean literalSearch = true;
+
+        /**
+         * 相对兜底：绝对阈值一条都没放行时，允许"明显胜出"的候选进来（默认开）。
+         *
+         * <p><b>老实说：这条在本项目实测的语料上一次都没触发过，收益没有被验证。</b>
+         * 留下它是作为"低分语料"的保险 —— 那种语料里所有命中都低于绝对阈值，
+         * 只剩"谁明显胜出"这一个可用判据。
+         *
+         * <h2>⚠️ 一段值得记下来的弯路</h2>
+         * <p>我一度用"自己写脚本算余弦"的方式量出：这份文档 7 个"答案确实在库里"的
+         * 问题只有 3 个能过 0.65（其余 0.44~0.64），据此判定"绝对阈值对同质文档整体误杀"。
+         * <b>那个结论是错的。</b> 换成应用自己的 {@code /documents/search} 重新量，
+         * 真实分布是 0.67~0.89（本领域 9 问全部达标）、0.59~0.64（域外全部不达标）——
+         * <b>0.65 恰好准确</b>。离线脚本算出的排名与线上完全一致，但绝对值整体低约 0.31。
+         *
+         * <p>教训：<b>排名对、数值错的结论比不知道更危险</b> —— 它会让人去改一个
+         * 本来正确的参数。调 {@code minScore} 之前必须用 {@code /documents/search} 取分。
+         */
+        private boolean relativeFallback = true;
+
+        /**
+         * 相对兜底的比值门槛：top1 / top2 ≥ 此值才认为"有明显赢家"。
+         *
+         * <p>默认 1.15 —— 实测这份语料的比值大多在 1.00~1.06（本领域与域外都如此），
+         * 所以它在实际使用中很少触发，这与"它一次都没触发过"的观察一致。
+         * 保留这个门槛是为了在真正低分的语料上仍然要求"有明显赢家"，
+         * 而不是无条件放行 top1。
+         */
+        private double relativeFallbackRatio = 1.15;
+
+        /** 字面引用检索最多补进几条候选。 */
+        private int literalMaxResults = 3;
 
         private QueryExpansion queryExpansion = new QueryExpansion();
 
@@ -659,6 +724,38 @@ public class QaProperties {
 
         public void setMinScore(double minScore) {
             this.minScore = minScore;
+        }
+
+        public boolean isLiteralSearch() {
+            return literalSearch;
+        }
+
+        public void setLiteralSearch(boolean literalSearch) {
+            this.literalSearch = literalSearch;
+        }
+
+        public boolean isRelativeFallback() {
+            return relativeFallback;
+        }
+
+        public void setRelativeFallback(boolean relativeFallback) {
+            this.relativeFallback = relativeFallback;
+        }
+
+        public double getRelativeFallbackRatio() {
+            return relativeFallbackRatio;
+        }
+
+        public void setRelativeFallbackRatio(double relativeFallbackRatio) {
+            this.relativeFallbackRatio = relativeFallbackRatio;
+        }
+
+        public int getLiteralMaxResults() {
+            return literalMaxResults;
+        }
+
+        public void setLiteralMaxResults(int literalMaxResults) {
+            this.literalMaxResults = literalMaxResults;
         }
     }
 

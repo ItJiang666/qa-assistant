@@ -3,6 +3,7 @@ package com.itjiang.qa.service;
 import com.itjiang.qa.common.BusinessException;
 import com.itjiang.qa.common.ErrorCode;
 import com.itjiang.qa.config.DataDirInitializer;
+import com.itjiang.qa.rag.SegmentCatalog;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.embedding.EmbeddingModel;
@@ -48,12 +49,23 @@ public class VectorStoreService {
     private final EmbeddingModel embeddingModel;
     private final DataDirInitializer dirs;
 
+    /**
+     * 字面检索用的片段目录。
+     *
+     * <p>注入它是为了让"向量库变了"这件事有个通知出口：{@code SegmentCatalog}
+     * 是从向量库的落盘文件重建的，库变了它就得重建（见该类的注释）。
+     * 依赖方向是单向的（{@code VectorStoreService → SegmentCatalog}），不构成循环。
+     */
+    private final SegmentCatalog segmentCatalog;
+
     public VectorStoreService(EmbeddingStore<TextSegment> store,
                               @Qualifier("qaEmbeddingModel") EmbeddingModel embeddingModel,
-                              DataDirInitializer dirs) {
+                              DataDirInitializer dirs,
+                              SegmentCatalog segmentCatalog) {
         this.store = store;
         this.embeddingModel = embeddingModel;
         this.dirs = dirs;
+        this.segmentCatalog = segmentCatalog;
     }
 
     /**
@@ -73,6 +85,8 @@ public class VectorStoreService {
                             + ", segments=" + segments.size());
         }
         store.addAll(embeddings, segments);
+        // 字面检索的片段目录要跟着失效，否则新入库的文档"搜不到"
+        segmentCatalog.markDirty();
     }
 
     /**
@@ -132,6 +146,7 @@ public class VectorStoreService {
      */
     public void removeByDocumentId(Long documentId) {
         store.removeAll(MetadataFilterBuilder.metadataKey("documentId").isEqualTo(documentId));
+        segmentCatalog.markDirty();
         log.info("已从向量库移除文档 {} 的向量", documentId);
     }
 
@@ -144,6 +159,7 @@ public class VectorStoreService {
      */
     public void clear() {
         store.removeAll();
+        segmentCatalog.markDirty();
         log.warn("向量库已清空");
     }
 
