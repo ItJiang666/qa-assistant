@@ -28,6 +28,22 @@ if not "%~1"=="" (
     )
 )
 
+rem ---------- 端口自检 ----------
+rem 为什么加：端口被占时 Spring 会抛一屏异常栈，用户看到 "Web server failed to start"，
+rem 完全不知道真实原因是"已经有一个实例在跑"。这里在启动前先探一次。
+rem 用 netstat 而不是 PowerShell 的 Get-NetTCPConnection：netstat 的输出是英文固定
+rem 格式，不受代码页影响，解析可靠；进程名交给 tasklist，已 chcp 65001。
+set "PORT_PID="
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr /r /c:"LISTENING" ^| findstr /r /c:":%PORT% "') do set "PORT_PID=%%p"
+if defined PORT_PID (
+    set "PORT_PROC="
+    for /f "tokens=1 delims=," %%n in ('tasklist /FI "PID eq !PORT_PID!" /FO CSV /NH 2^>nul') do if not defined PORT_PROC set "PORT_PROC=%%~n"
+    echo.
+    echo [X] 端口 %PORT% 已被占用^(PID !PORT_PID!，进程 !PORT_PROC!^)，无法启动。
+    echo     最可能的情况：已经有一个本程序在运行 —— 先看任务栏里有没有它的窗口。
+    echo     换一个端口启动：  start.cmd 8081
+    goto :fail
+)
 echo.
 echo ============================================================
 echo   qa-assistant 智能问答助手 - 启动前检查

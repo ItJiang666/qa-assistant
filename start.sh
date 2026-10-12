@@ -140,6 +140,29 @@ if [ "$OLLAMA_OK" = "1" ]; then
   echo "    装完刷新页面按钮才会亮；不装不影响问答、上传、检索。"
 fi
 
+# ---------- 4.6) 端口自检 ----------
+# 为什么加：端口被占时 Spring 会抛一屏异常栈，用户看到的是
+# "Web server failed to start"，完全不知道真实原因是"已经有一个实例在跑"。
+# 这里在启动前先探一次，给一句能照做的话。
+PORT_PID=""
+if command -v ss >/dev/null 2>&1; then
+  PORT_PID="$(ss -lntp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p"$" {print $NF}' | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -n 1)"
+elif command -v lsof >/dev/null 2>&1; then
+  PORT_PID="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -n 1)"
+elif command -v netstat >/dev/null 2>&1; then
+  # Linux netstat 的进程列形如 "1234/java"，macOS 是 "java" 或带 pid 前缀
+  PORT_PID="$(netstat -lntp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p"$" {print $7}' | sed -n 's#^\([0-9]*\)/.*#\1#p' | head -n 1)"
+fi
+if [ -n "${PORT_PID:-}" ]; then
+  PORT_PROC="$(ps -p "$PORT_PID" -o comm= 2>/dev/null | head -n 1)"
+  echo
+  echo "[X] 端口 $PORT 已被占用（PID $PORT_PID，进程 ${PORT_PROC:-未知}），无法启动。"
+  echo "    最可能的情况：已经有一个本程序在运行。"
+  echo "    换一个端口启动：  ./start.sh 8081"
+  exit 1
+fi
+echo "[OK] 端口 $PORT 可用"
+
 echo
 echo "============================================================"
 echo "  正在启动，服务地址 http://localhost:$PORT"
