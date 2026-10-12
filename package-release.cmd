@@ -69,6 +69,8 @@ copy /y "start.cmd" "!STAGE!\" >nul
 copy /y "start.sh" "!STAGE!\" >nul
 copy /y "enable-gpu.cmd" "!STAGE!\" >nul
 copy /y "enable-gpu.sh" "!STAGE!\" >nul
+copy /y "enable-ocr.cmd" "!STAGE!\" >nul
+copy /y "enable-ocr.sh" "!STAGE!\" >nul
 copy /y ".env.example" "!STAGE!\" >nul
 copy /y "LICENSE" "!STAGE!\" >nul
 copy /y "README.md" "!STAGE!\" >nul

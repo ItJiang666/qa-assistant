@@ -54,11 +54,11 @@ java -jar qa-assistant-1.0.0-SNAPSHOT.jar
 > 不装的话该功能不可用并在界面上给出提示，**问答、上传、检索全都不受影响**。
 > 详见下方「扫描版 PDF 的文字识别」与「前置条件」。
 
-> **装了 Python 并且有 NVIDIA 独显？** 再跑一条命令就能让识别快约 3 倍：
-> `enable-gpu.cmd`（Windows 双击）/ `bash enable-gpu.sh`（Linux）。
-> **它会把 OCR 依赖一并装齐**（不只是 GPU 运行库），不需要你先跑 `requirements.txt`；
-> 会自动识别显卡与驱动、选对源、装完验证是否真的生效；
-> **显卡太老会提前告诉你并改走 CPU，不会让你白下 1 GB**。详见下方「可选：启用 GPU 加速」。
+> **装了 Python？** 让"扫描版 PDF 识别"这项功能可用，一条命令：
+> **有 NVIDIA 独显** → `enable-gpu.cmd`（双击，识别快约 3 倍）；
+> **没有独显** → `enable-ocr.cmd`（双击，约 50 MB）。
+> 两者都会把 OCR 依赖**一并装齐**，不需要先跑 `requirements.txt`，
+> 并且会**检测环境、选对源、装完自检**。详见下方「可选：启用 GPU 加速」。
 
 > 第 2 步虽然多了一行，但它把"每一问都慢"变成"载入一次就稳定"：
 > 向量模型自带的上下文是 40960，不压下来它会独占约 **10 GB 显存**，把对话模型挤出去，
@@ -266,18 +266,23 @@ python -c "import sys, rapidocr, onnxruntime, pymupdf; print('OCR 依赖就绪')
 
 #### 一键启用（推荐）
 
-```cmd
-enable-gpu.cmd          :: Windows，双击即可
-bash enable-gpu.sh      :: Linux / macOS
-```
+**看你的机器有没有 NVIDIA 独显，选一个：**
 
-**从零开始就这一条命令**：它会把 OCR 需要的东西**一并装齐**，不需要你先跑
-`requirements.txt`。脚本自动完成六件事，**你不需要手动判断任何东西**：
+| 你的情况 | 用哪个 | 装什么 | 耗时 |
+|---|---|---|---|
+| **没有 NVIDIA 显卡**（或不想装 GPU） | **`enable-ocr.cmd`** / `bash enable-ocr.sh` | 三个包，约 50 MB | 十几秒 |
+| **有 NVIDIA 独显**（图灵及以后） | `enable-gpu.cmd` / `bash enable-gpu.sh` | 上面三个 **+ CUDA 运行库**，约 1.07 GB | 2~3 分钟 |
+
+**两个脚本都从零开始就一条命令**，不需要你先跑 `requirements.txt` ——
+它们会把 OCR 需要的东西**一并装齐**，并验证三/四个包都能 import
+（与应用的真实判定标准一致）。
+
+`enable-gpu.cmd` 自动完成六件事，**你不需要手动判断任何东西**：
 
 1. 找到能用的 Python（**会跳过 Microsoft Store 的假 `python3`**），并**打印它将要修改的解释器绝对路径**请你确认
 2. 读 `nvidia-smi`，报出你的显卡型号与驱动版本
-3. 按驱动版本自动选源：**驱动 ≥ 580 用 CUDA 13，更旧用 CUDA 12**
-4. **装 OCR 基线**（`rapidocr` + `pymupdf`）—— 这一步和显卡无关，但少了它 OCR 根本不能用
+3. 按驱动版本自动选源：**驱动 ≥ 580 用 CUDA 13，更旧用 CUDA 12**；显卡太老则直接改走 CPU
+4. **装 OCR 基线**（`rapidocr` + `pymupdf`）
 5. 下载并安装 GPU 运行库（约 1.07 GB）
 6. **验证 `CUDAExecutionProvider` 真的出现**，再给你一句人话结论
 
@@ -286,8 +291,15 @@ bash enable-gpu.sh      :: Linux / macOS
 > 所以"只装 GPU 包"的机器依然做不了 OCR。脚本把它们一起装上，
 > 也因此**没显卡的机器跑这一个脚本也能直接可用**（走 CPU）。
 
-想先看它打算做什么、不实际安装：加 `--check`。
-明确只想装 CPU 版：加 `--cpu`（只装基线，不碰 GPU 运行库）。
+> ⚠️ **`enable-ocr.cmd`（CPU 版）有一道守卫，值得知道**：如果你的环境里**已经装了
+> `onnxruntime-gpu`**，它**不会**再装 CPU 版的 `onnxruntime`。因为两者的文件落在
+> **同一个目录**、pip 却记成两条独立记录，装了 CPU 版就会把 GPU 版**覆盖掉**，
+> 于是 `CUDAExecutionProvider` 消失、**GPU 加速被静默关掉且不报任何错**
+> —— 这个坑是实测踩出来的（真的弄坏过一台开发机）。检测到 GPU 版时它只补装
+> `rapidocr` / `pymupdf`。
+
+`--check` 可以只看它打算做什么、不实际安装。
+`enable-gpu.cmd --cpu` 等价于 CPU 版（只装基线，不碰 GPU 运行库）。
 
 #### 我的显卡行不行？
 
