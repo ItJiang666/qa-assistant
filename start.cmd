@@ -168,9 +168,10 @@ echo   关闭本窗口即停止服务
 echo ============================================================
 echo.
 
-rem 稍等几秒再开浏览器：给 Spring Boot 一点启动时间，避免打开白页。
-rem 用 ping 而不是 timeout 做延时 —— timeout 在 stdin 被重定向时会直接报错退出。
-start "" /min cmd /c "ping -n 9 127.0.0.1 >nul & start http://localhost:%PORT%"
+rem 等端口真的能响应再开浏览器 —— 固定延时实测不够：
+rem 启动实测 10.6 秒（其中 Hikari 建第一条数据库连接就占了 8.7 秒），而原先写死等 8 秒，
+rem 于是浏览器早到 2~3 秒，页面加载失败，用户看到的就是"连接不上"。
+start "" /min powershell -NoProfile -Command "$u='http://localhost:%PORT%'; for($i=0;$i -lt 120;$i++){ try{ $r=Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -eq 200){ Start-Process $u; break } }catch{}; Start-Sleep -Milliseconds 500 }"
 
 java -jar "!JAR!" --server.port=%PORT%
 set "EXIT_CODE=%errorlevel%"
