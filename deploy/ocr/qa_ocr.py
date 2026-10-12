@@ -69,6 +69,7 @@ stdout 里必须出现且只出现一对哨兵，中间是**单行 JSON**：
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -128,6 +129,30 @@ def emit(payload: dict) -> None:
     sys.stdout.flush()
 
 
+def report(payload: dict, args) -> None:
+    """打一行**进度**（不套哨兵）。
+
+    <h2>为什么不套哨兵</h2>
+    结果只有一个、进度有很多条，两者混在一个协议里迟早出错。现在分工明确：
+      * **哨兵之间** = 最终结果，Java 侧只认这一段（`extractPayload` 用正则截取）；
+      * **哨兵之外** = 进度/诊断，Java 侧按哨兵取结果时天然忽略，一个字都不用改。
+
+    这正是当初选"哨兵包裹"而不是"假设 stdout 全是 JSON"的意外收益（见模块头注释）。
+
+    进度行还有个实际用途：38 页扫描件要跑几十秒，用户在这期间看不到任何反馈，
+    只会以为程序卡死。Java 侧把子进程输出整段读下来，需要时可以从里面挑出进度行。
+    行内带 `"qaProgress": true` 便于识别。
+    """
+    if getattr(args, "progress", "on") != "on":
+        return
+    try:
+        sys.stdout.write(json.dumps({"qaProgress": True, **payload}, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+    except Exception:
+        # 进度打不出来绝不能影响识别本身
+        pass
+
+
 def fail(code: int, message: str, **extra) -> int:
     emit({"ok": False, "errorCode": code, "message": message, **extra})
     return code
@@ -164,6 +189,108 @@ def check_dependencies() -> int:
         )
     emit({"ok": True, "engine": "rapidocr", "versions": versions})
     return EXIT_OK
+
+
+def _nvidia_dll_dirs() -> list[str]:
+    """找出 pip 安装的 NVIDIA 运行时 DLL 目录（`site-packages/nvidia/**/bin`）。
+
+    <h2>为什么需要这个函数（实测踩出来的坑，别删）</h2>
+    `onnxruntime-gpu` 的 CUDA 版会依赖 `cublasLt64_13.dll`、`cudnn64_9.dll` 这些库，
+    它们由 `nvidia-cublas` / `nvidia-cudnn-cu13` 等包提供，落在
+    `site-packages/nvidia/<组件>/bin[/x86_64]` 下面 —— **不在系统 PATH 上**。
+
+    于是会出现这个极具迷惑性的现象：包明明装好了、`get_available_providers()`
+    也确实列出了 `CUDAExecutionProvider`，但真正建会话时报
+
+        Error loading "onnxruntime_providers_cuda.dll" which depends on
+        "cublasLt64_13.dll" which is missing. (Error 126)
+
+    然后**静默回落到 CPU**（表面看只是"没变快"，不报错）。
+
+    两种常见修法实测**都无效**：
+      * `os.add_dll_directory()` —— onnxruntime 加载 EP 时不走这个搜索路径；
+      * 装完之后再改 PATH —— onnxruntime 在 **import 那一刻**就注册执行器，晚了。
+
+    唯一有效的做法：在 import onnxruntime **之前**把这些目录塞进 PATH。
+    本模块的 `configure_gpu()` 就是这个时机，且由 `main()` 最早调用。
+    """
+    dirs: list[str] = []
+    for entry in sys.path:
+        if not entry or not os.path.isdir(entry):
+            continue
+        root = os.path.join(entry, "nvidia")
+        if not os.path.isdir(root):
+            continue
+        # 布局随包版本变过：有的直接 <组件>/bin，有的 <组件>/bin/x86_64
+        for pattern in ("*/bin", "*/bin/x86_64", "*/*/bin", "*/*/bin/x86_64"):
+            dirs.extend(glob.glob(os.path.join(root, pattern)))
+    # 去重且保持顺序
+    return [d for d in dict.fromkeys(dirs) if os.path.isdir(d)]
+
+
+def configure_gpu(use_cuda: bool) -> dict:
+    """在**导入 onnxruntime 之前**决定能否用 GPU，并准备好搜索路径。
+
+    @param use_cuda 是否希望用 GPU（False 时直接返回，不做任何探测）
+    @return 形如 {"enabled": bool, "providers": [...], "reason": str} 的说明
+    """
+    if not use_cuda:
+        return {"enabled": False, "providers": [], "reason": "未开启（--use-gpu off）"}
+
+    dirs = _nvidia_dll_dirs()
+    if dirs:
+        os.environ["PATH"] = os.pathsep.join(dirs + [os.environ.get("PATH", "")])
+
+    try:
+        import onnxruntime
+    except Exception as exc:                       # 没装 onnxruntime，交给调用方报缺依赖
+        return {"enabled": False, "providers": [], "reason": "onnxruntime 不可用：%s" % exc}
+
+    try:
+        providers = list(onnxruntime.get_available_providers())
+        device = onnxruntime.get_device()
+    except Exception as exc:
+        return {"enabled": False, "providers": [], "reason": "查询执行器失败：%s" % exc}
+
+    if "CUDAExecutionProvider" not in providers:
+        # 装的是 CPU 版 onnxruntime（PyPI 上的 onnxruntime，其 CUDA 版叫 onnxruntime-gpu）
+        return {
+            "enabled": False,
+            "providers": providers,
+            "reason": "当前 onnxruntime 无 CUDA 执行器（版本 %s）；"
+                      "要提速请装 onnxruntime-gpu" % getattr(onnxruntime, "__version__", "?"),
+        }
+    if device != "GPU":
+        return {"enabled": False, "providers": providers, "reason": "onnxruntime 报告设备为 %s" % device}
+
+    return {
+        "enabled": True,
+        "providers": providers,
+        "reason": "CUDA 可用（nvidia 运行库目录 %d 个）" % len(dirs),
+    }
+
+
+def build_engine_params(gpu_enabled: bool, max_side_len: int, use_cls: bool) -> dict:
+    """组装 RapidOCR 的引擎参数。
+
+    <h2>三个参数各自的依据（都是实测值，别凭感觉改）</h2>
+      * `use_cuda`：实测同一份 38 页扫描件，CPU 65.3 s → GPU 20.2 s（**3.2 倍**），
+        识别结果逐页相似度 99.96%（33/38 页完全一致）。
+      * `max_side_len` 2000 → 1280：实测识别耗时 2.21 → 1.55 s/页（**-30%**）而
+        **字数不减反略增**（756→759）。降到 960 会掉字（725），所以 1280 是拐点。
+        它管的是"位图送进检测网络前压到多长边"，200 DPI 的 A4 是 1654×2481，
+        压到 1280 后检测网络负担明显下降。
+      * `use_cls=False`：关闭文本行方向分类（判断是否 180° 倒置）。本项目处理的
+        都是正立扫描件，这步是白跑，实测省约 7%。**代价**：倒置/横向的扫描件可能识别不出，
+        文档里已写明"请先把扫描件转正"。
+    """
+    params = {
+        "Global.max_side_len": int(max_side_len),
+        "Global.use_cls": bool(use_cls),
+    }
+    if gpu_enabled:
+        params["EngineConfig.onnxruntime.use_cuda"] = True
+    return params
 
 
 def is_noise(text: str) -> bool:
@@ -296,6 +423,49 @@ def recognize_bitmap(engine, png_bytes, min_confidence):
     return kept, kept_scores
 
 
+def image_covers_page(page, xref, ratio_threshold: float) -> bool:
+    """判断这张内嵌图是不是"整页扫描图"（铺满整个页面）。
+
+    <h2>为什么必须判这个（实测数据，省下一半时间）</h2>
+    扫描件 PDF 的典型结构是：**每页一张大图，就是这一页的扫描件本身**，
+    页面上没有别的元素。实测用户那份 38 页 PDF：每页 1 张 1190×1683 的图，
+    在页面上占 **100%** 面积。
+
+    这种情况下"逐页渲染 + 识别"（主流程）已经把整页内容完整读过了，
+    再把这些图抽出来放大识别一遍是**纯重复劳动** —— 实测那一遍花了 **62 秒
+    （占 46% 时间）**，而 38 张里 **37 张被判重丢弃、只有 1 张真有字**，
+    最终字数只差 3%（24,954 vs 25,745）。GPU 下这一遍同样要花约 17 秒。
+
+    <h2>为什么不能干脆关掉内嵌图识别</h2>
+    这条通道是为**另一种情况**存在的：正文是文字层，中间插了一张小截图/表格照片，
+    整页渲染时那部分字太细检测不到（详见 extract_page_images 的注释）。
+    那种图**只占页面一小块**，不会达到这里 80% 的阈值。
+
+    所以判据是"占页面多大"而不是"要不要识别" —— **能力一点没减，只是不再对自己重复**。
+
+    @param page            PyMuPDF 页面
+    @param xref            图片对象号
+    @param ratio_threshold 面积占比阈值，超过即判为整页图
+    @return True 表示这是整页图，应跳过单独识别
+    """
+    try:
+        page_area = page.rect.width * page.rect.height
+        if page_area <= 0:
+            return False
+        rects = page.get_image_rects(xref)
+        if not rects:
+            # 拿不到显示区域（图被裁剪或变换）——保守起见当作"不是整页图"，
+            # 宁可多识别一次，也不要漏掉内容。
+            return False
+        for rect in rects:
+            if rect.width * rect.height >= page_area * ratio_threshold:
+                return True
+        return False
+    except Exception:
+        # 任何异常都退回"不跳过"：保守方向与上面一致
+        return False
+
+
 def extract_page_images(doc, engine, args, page_texts_by_index=None):
     """抽取内嵌图片并识别其中的文字，**丢掉与整页结果重复的部分**。
 
@@ -306,12 +476,14 @@ def extract_page_images(doc, engine, args, page_texts_by_index=None):
       * 页面主体是模糊扫描件（低对比、倾斜），而插在其中的截图反而清晰。
     这时按图单独抽出来识别，才能把那部分文字捞回来。
 
-    <h2>为什么要做重复判定（两轮实测的结论）</h2>
-    第一版按"整页字数够多就跳过整页"来避免重复 —— **失败**：实测一页只读出 48 字，
-    低于当时设的 50 阈值，于是同一张截图被识别两遍，其中图那遍还带错字
-    （整页给 `dpi`/`200`，逐图放大后给 `! d p`/全角 `２00`）。
-    改成逐行比对内容：图里识别出的行若大多已出现在该页的整页结果里，整块丢弃。
-    这样"重复"由内容本身判定，不依赖任何字数阈值。
+    <h2>三道过滤，各有各的依据</h2>
+    1. **尺寸过滤**（min_image_side / min_image_pixels）：图标、logo、分隔线不是内容。
+    2. **整页图过滤**（`--page-image-ratio`，新增）：图占页面 ≥80% 面积时，
+       它就是这一页的扫描件，主流程刚读过 —— 见 image_covers_page 的实测数据。
+       这一道把"扫描件 PDF"的时间砍掉近一半。
+    3. **内容判重**（IMAGE_DUP_RATIO）：即便通过了前两道，图里识别出的行若大多
+       已出现在该页整页结果里，整块丢弃。**这一道是兜底，不是主力** ——
+       实测它在扫描件上要"识别完才发现是重复"，钱已经花掉了。
 
     @param page_texts_by_index 页码 → 该页整页识别文本（用于去重）
     @return (图片段落列表, 纳入识别的图片数, 其中有文字的图片数, 置信度列表, 去重丢弃数)
@@ -322,6 +494,7 @@ def extract_page_images(doc, engine, args, page_texts_by_index=None):
     considered = 0
     with_text = 0
     duplicates = 0
+    skipped_full_page = 0
 
     for index in range(doc.page_count):
         if considered >= args.max_images:
@@ -336,6 +509,12 @@ def extract_page_images(doc, engine, args, page_texts_by_index=None):
         for seq, info in enumerate(images, start=1):
             if considered >= args.max_images:
                 break
+
+            # 第 2 道：整页扫描图跳过（主流程已读过，别重复花钱）
+            if image_covers_page(page, info[0], args.page_image_ratio):
+                skipped_full_page += 1
+                continue
+
             png_bytes = render_image(doc, info[0], args.min_image_side, args.min_image_pixels)
             if png_bytes is None:
                 continue                       # 尺寸太小，判为图标/装饰
@@ -345,7 +524,7 @@ def extract_page_images(doc, engine, args, page_texts_by_index=None):
             if not kept:
                 continue
 
-            # 按内容判重：这一行在整页结果里出现过就算重复。
+            # 第 3 道：按内容判重：这一行在整页结果里出现过就算重复。
             # 用"包含"而不是"相等"——整页结果里同一行可能被切分或带前后缀。
             fresh = [line for line in kept if line not in page_text]
             if len(fresh) < max(1, int(len(kept) * (1 - IMAGE_DUP_RATIO))):
@@ -355,6 +534,10 @@ def extract_page_images(doc, engine, args, page_texts_by_index=None):
             with_text += 1
             confidences.extend(kept_scores)
             blocks.append("[第 %d 页·插图 %d]\n%s" % (index + 1, seq, "\n".join(fresh)))
+
+    if skipped_full_page:
+        report({"stage": "images", "skippedFullPage": skipped_full_page,
+                "considered": considered, "duplicates": duplicates}, args)
 
     return blocks, considered, with_text, confidences, duplicates
 
@@ -387,10 +570,40 @@ def main() -> int:
     # 会以为自己传错了格式。
     parser.add_argument("input_path", nargs="?", help="待识别的文件路径（PDF 或图片）")
     parser.add_argument("--check", action="store_true", help="只做依赖自检")
-    parser.add_argument("--max-pages", type=int, default=50, help="页数上限，超出直接拒绝")
+    parser.add_argument("--max-pages", type=int, default=100, help="页数上限，超出直接拒绝")
     parser.add_argument("--dpi", type=int, default=200, help="拆页渲染 DPI，越高越准也越慢")
     parser.add_argument("--min-confidence", type=float, default=0.5, help="低于此置信度的行丢弃")
     parser.add_argument("--preview-chars", type=int, default=500, help="回给 Java 的预览字数")
+    parser.add_argument(
+        "--use-gpu",
+        choices=["on", "off", "auto"],
+        default="auto",
+        help="是否用 GPU 跑识别：auto=有 CUDA 就用（默认），off=强制 CPU，on=要求 GPU",
+    )
+    parser.add_argument(
+        "--max-side-len",
+        type=int,
+        default=1280,
+        help="送进检测网络的位图长边上限。默认 1280（实测比 2000 快 30%% 且不掉字）",
+    )
+    parser.add_argument(
+        "--use-cls",
+        choices=["on", "off"],
+        default="off",
+        help="是否判断文本行方向（180° 倒置）。默认 off —— 本项目处理正立扫描件，省约 7%%",
+    )
+    parser.add_argument(
+        "--page-image-ratio",
+        type=float,
+        default=0.8,
+        help="内嵌图占页面面积超过此比例时判为'整页扫描图'，整页那遍已读过，不再单独识别（默认 0.8）",
+    )
+    parser.add_argument(
+        "--progress",
+        choices=["on", "off"],
+        default="on",
+        help="是否在识别过程中往 stdout 打进度行（哨兵之外，Java 侧按哨兵取结果，不受影响）",
+    )
     parser.add_argument(
         "--detect-images",
         choices=["on", "off"],
@@ -466,8 +679,21 @@ def main() -> int:
         )
 
     # ---- 初始化引擎（模型随包下发，此步不联网）----
+    #  ⚠️ GPU 探测必须在 RapidOCR() **之前**做：onnxruntime 在导入时就注册执行器，
+    #     而 CUDA 的依赖 DLL 需要提前出现在 PATH 上（原因见 _nvidia_dll_dirs 的注释）。
+    gpu = configure_gpu(args.use_gpu in ("on", "auto"))
+    if args.use_gpu == "on" and not gpu["enabled"]:
+        doc.close()
+        return fail(EXIT_INTERNAL, "要求用 GPU 但 CUDA 不可用：%s" % gpu["reason"])
+
+    engine_params = build_engine_params(gpu["enabled"], args.max_side_len, args.use_cls == "on")
+    report(
+        {"stage": "engine", "gpu": gpu["enabled"], "gpuReason": gpu["reason"],
+         "engine": "rapidocr", "maxSideLen": args.max_side_len, "useCls": args.use_cls == "on"},
+        args,
+    )
     try:
-        engine = RapidOCR()
+        engine = RapidOCR(params=engine_params)
     except Exception as exc:
         doc.close()
         return fail(EXIT_INTERNAL, "OCR 引擎初始化失败：%s" % exc)
@@ -492,6 +718,9 @@ def main() -> int:
                 joined = "\n".join(kept)
                 page_texts.append("[第 %d 页]\n%s" % (index + 1, joined))
                 page_texts_by_index[index] = joined
+            # 逐页报进度：38 页要跑几十秒，没有反馈时用户会以为卡死
+            report({"stage": "page", "page": index + 1, "total": total_pages,
+                    "pagesWithText": pages_with_text}, args)
     except Exception as exc:
         doc.close()
         return fail(EXIT_INTERNAL, "识别过程中出错：%s" % exc)
@@ -538,6 +767,11 @@ def main() -> int:
             "ok": True,
             "engine": "rapidocr",
             "engineVersion": _package_version("rapidocr"),
+            # 实际跑在 GPU 还是 CPU：用户反馈"慢"时，第一个要确认的就是这个。
+            # 注意它是**实测结论**而不是配置请求 —— 装了 GPU 包但 CUDA 运行库没就位时，
+            # onnxruntime 会静默回落到 CPU，只有看这个字段才能发现。
+            "gpu": gpu["enabled"],
+            "gpuReason": gpu["reason"],
             "totalPages": total_pages,
             "pagesWithText": pages_with_text,
             # 内嵌图片的统计：Java 侧用它向用户说明"这张图里有没有字"，

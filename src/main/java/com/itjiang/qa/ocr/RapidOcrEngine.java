@@ -216,11 +216,22 @@ public class RapidOcrEngine implements OcrEngine {
         QaProperties.Ocr cfg = properties.getOcr();
         // 位置参数在 Python 侧叫 input_path（PDF 或图片都走它），
         // 名字与脚本保持一致，免得下次改脚本时两边对不上。
+        //
+        // 这些参数都配了默认值，理论上可以省掉不传；**仍然显式传**是因为：
+        // 两端默认值一旦漂移（脚本改了默认、Java 不知道），行为会静默变化，
+        // 而"配置里写的就是实际生效的"是排查问题时的基本前提。
         List<String> command = new ArrayList<>(List.of(
                 python, script.toString(), file.toString(),
                 "--max-pages", String.valueOf(cfg.getMaxPages()),
                 "--dpi", String.valueOf(cfg.getDpi()),
-                "--min-confidence", String.valueOf(cfg.getMinConfidence())));
+                "--min-confidence", String.valueOf(cfg.getMinConfidence()),
+                // GPU：auto 让脚本自己判断，用不了就静默回落 CPU（见 QaProperties.Ocr#useGpu）
+                "--use-gpu", cfg.getUseGpu() == null || cfg.getUseGpu().isBlank() ? "auto" : cfg.getUseGpu(),
+                "--max-side-len", String.valueOf(cfg.getMaxSideLen()),
+                "--page-image-ratio", String.valueOf(cfg.getPageImageRatio()),
+                // 进度行打在哨兵之外，取值时天然被忽略（见 extractPayload）。
+                // 开着是为了"识别到第几页"能进日志 —— 用户反馈"卡住了"时，这一行就是答案。
+                "--progress", "on"));
 
         // 时长配置是字符串（形如 3m），与项目其它 timeout 走同一个解析器，保证 3m/180s 都认
         java.time.Duration timeout = DurationParser.parse(cfg.getTimeout(), java.time.Duration.ofMinutes(3));
@@ -255,6 +266,18 @@ public class RapidOcrEngine implements OcrEngine {
             }
             if (!payload.path("ok").asBoolean(false)) {
                 throw mapFailure(payload, exitCode);
+            }
+
+            // GPU 实际生效情况只记日志、不进 OcrResult：
+            // 界面上要展示的是"识别质量"（置信度、页数覆盖），而"这次跑在哪个设备上"
+            // 是**诊断信息** —— 用户反馈"慢"时从日志里一眼就能看到是没生效还是真慢。
+            // 加进 DTO 会让前端多一个几乎无人看的字段，不划算。
+            boolean gpuUsed = payload.path("gpu").asBoolean(false);
+            String gpuReason = payload.path("gpuReason").asString("");
+            if (gpuUsed) {
+                log.info("OCR 使用 GPU 加速: id={}", documentId);
+            } else {
+                log.info("OCR 使用 CPU: id={}, 原因={}", documentId, gpuReason);
             }
 
             return new OcrResult(

@@ -155,8 +155,14 @@ async function loadOcrAvailability() {
 /**
  * 识别文字。
  *
- * ⚠️ 识别是**同步阻塞**的一次请求（50 页约 2 分钟），所以按钮必须给出
+ * ⚠️ 识别是**同步阻塞**的一次请求（100 页 CPU 约 2 分钟、GPU 约 45 秒），所以按钮必须给出
  * 明确的进行中文案。没有进度感的等待，用户一定会以为卡死了然后去点第二次。
+ *
+ * <p>为什么不做**逐页**进度条：那需要把 OCR 改成异步任务 + 轮询/SSE，是把一个
+ * 已有功能整体重构，而收益只是"进度更细"。当前做法（按钮转圈 + 量级时间提示）
+ * 已经解决了"是不是卡死了"这个真正的问题，重构的性价比不足。
+ * 逐页进度目前进的是**后端日志**（`qa-assistant.log` 里能看到"第 N 页"），
+ * 用户反馈慢时可以据此判断卡在哪一步。
  */
 async function handleRecognize(row: DocumentItem) {
   if (ocrRunningId.value !== null) {
@@ -164,7 +170,7 @@ async function handleRecognize(row: DocumentItem) {
     return
   }
   ocrRunningId.value = row.id
-  ElMessage.info(`正在本机识别《${row.fileName}》，${ocr.value?.maxPages ?? 50} 页以内约需 ${estimateHint()}，请稍候`)
+  ElMessage.info(`正在本机识别《${row.fileName}》，${ocr.value?.maxPages ?? 100} 页以内约需 ${estimateHint()}，请稍候`)
   try {
     ocrPreview.value = await api.recognizeOcr(row.id)
   } catch (e) {
@@ -177,8 +183,19 @@ async function handleRecognize(row: DocumentItem) {
   }
 }
 
+/**
+ * 识别耗时的粗略预估。
+ *
+ * 刻意**只给量级**（"几十秒"而不是"37 秒"）：实际耗时取决于页数、有没有 GPU、
+ * CPU 忙不忙，给一个具体数字必然频繁失准，而失准的倒计时比没有倒计时更让人焦虑。
+ *
+ * 依据（实测同一份 38 页扫描件）：
+ *   * 优化前 CPU 128 s；优化后 CPU 47 s、GPU 17 s
+ *   * 上限 100 页时，CPU 约 2 分钟、GPU 约 45 秒
+ * 所以"几十秒到两分钟"覆盖了绝大多数情况。
+ */
 function estimateHint(): string {
-  return '1~3 分钟'
+  return '几十秒到两分钟'
 }
 
 /** 确认入库。 */
