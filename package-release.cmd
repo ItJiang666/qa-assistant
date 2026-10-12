@@ -67,6 +67,8 @@ mkdir "!STAGE!\docs" >nul 2>nul
 copy /y "!JAR!" "!STAGE!\!JAR_NAME!" >nul
 copy /y "start.cmd" "!STAGE!\" >nul
 copy /y "start.sh" "!STAGE!\" >nul
+copy /y "enable-gpu.cmd" "!STAGE!\" >nul
+copy /y "enable-gpu.sh" "!STAGE!\" >nul
 copy /y ".env.example" "!STAGE!\" >nul
 copy /y "LICENSE" "!STAGE!\" >nul
 copy /y "README.md" "!STAGE!\" >nul

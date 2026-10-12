@@ -87,6 +87,8 @@ mkdir -p "$STAGE/deploy/ollama" "$STAGE/deploy/ocr" "$STAGE/docs"
 cp "$JAR"            "$STAGE/$JAR_NAME"
 cp start.sh          "$STAGE/"
 cp start.cmd         "$STAGE/"
+cp enable-gpu.sh     "$STAGE/"
+cp enable-gpu.cmd    "$STAGE/"
 cp .env.example      "$STAGE/"
 cp LICENSE           "$STAGE/"
 cp README.md         "$STAGE/"
@@ -96,7 +98,7 @@ cp deploy/ollama/Modelfile.qa-embed "$STAGE/deploy/ollama/"
 cp deploy/ocr/qa_ocr.py            "$STAGE/deploy/ocr/"
 cp deploy/ocr/requirements.txt     "$STAGE/deploy/ocr/"
 
-chmod +x "$STAGE/start.sh"
+chmod +x "$STAGE/start.sh" "$STAGE/enable-gpu.sh"
 
 # 防止误发：.env 绝不能进包（哪怕它存在于工作目录）
 rm -f "$STAGE/.env"
