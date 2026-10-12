@@ -60,7 +60,7 @@ if not defined PY (
   echo     GPU is optional, so the CPU path keeps working without this script.
   goto :fail
 )
-echo [1/5] Python : !PYVER!  (!PYARCH!)
+echo [1/6] Python : !PYVER!  (!PYARCH!)
 for /f "delims=" %%v in ('!PY! -c "import sys;print(sys.executable)" 2^>nul') do set "PYPATH=%%v"
 echo       target : !PYPATH!
 
@@ -105,14 +105,15 @@ for /f "usebackq delims=" %%v in (`""!NVSMI!" --query-gpu^=name --format^=csv^,n
 )
 
 if not defined DRV (
-  echo [2/5] NVIDIA driver : NOT FOUND
+  echo [2/6] NVIDIA driver : NOT FOUND
   echo.
-  echo [i] No usable NVIDIA GPU detected on this machine.
-  echo     GPU acceleration is OPTIONAL -- OCR still works on CPU.
-  echo     See README section "enable GPU acceleration" for the CPU timings.
+  echo [i] No usable NVIDIA GPU detected on this machine -- skipping the GPU
+  echo     runtime ^(it would be a pointless ~1 GB download^).
+  echo     Installing the CPU OCR baseline instead, so the feature still works.
+  call :install_baseline
   goto :done_cpu
 )
-echo [2/5] GPU    : !GPUNAME!
+echo [2/6] GPU    : !GPUNAME!
 echo       driver : !DRV!
 
 rem  CUDA 13 needs driver >= 580. Parse the major version and compare.
@@ -122,9 +123,9 @@ set /a "DRVNUM=DRVMAJOR" 2>nul
 if not defined DRVNUM set "DRVNUM=0"
 
 if !DRVNUM! GEQ 580 (
-  echo [3/5] CUDA   : 13  ^(driver !DRV! ^>= 580^)
+  echo [3/6] CUDA   : 13  ^(driver !DRV! ^>= 580^)
 ) else (
-  echo [3/5] CUDA   : 12  ^(driver !DRV! ^< 580, using the CUDA 12 build^)
+  echo [3/6] CUDA   : 12  ^(driver !DRV! ^< 580, using the CUDA 12 build^)
   set "CUDA_INDEX=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"
   set "ORT_SPEC=onnxruntime-gpu==1.29.0"
 )
@@ -137,21 +138,42 @@ if not errorlevel 1 (
   echo.
   echo [i] This GPU generation ^(GTX 10-series / older^) is no longer supported by
   echo     the CUDA runtimes that onnxruntime-gpu needs. The install would
-  echo     succeed but CUDAExecutionProvider would fail to start.
-  echo     Recommendation: keep using the CPU path -- it already got a ~6x
+  echo     succeed but CUDAExecutionProvider would fail to start, so we skip it
+  echo     rather than waste a ~1 GB download.
+  echo     Installing the CPU OCR baseline instead -- it already got a ~6x
   echo     speedup in v1.28 and needs no extra downloads.
+  call :install_baseline
   goto :done_cpu
 )
 
 if defined TARGET (
   if "!TARGET!"=="cpu" (
-    echo [i] --cpu given: skipping the install.
+    echo [i] --cpu given: skipping the GPU runtime.
+    echo     Installing the CPU OCR baseline only.
+    call :install_baseline
     goto :done_cpu
   )
 )
 
-rem ---- 4/5. install ---------------------------------------------------------
-echo [4/5] About to install:  %ORT_SPEC%
+rem ---- 4/5. OCR baseline, ALWAYS install -------------------------------------
+rem  onnxruntime is only the INFERENCE BACKEND. What actually reads text is
+rem  `rapidocr`, and PDF pages are rasterized by `pymupdf` -- neither is pulled
+rem  in by onnxruntime-gpu. So a machine that only ran this script would still
+rem  have no working OCR. Install the baseline here too.
+rem
+rem  No conflict with the GPU package: rapidocr only depends on `onnxruntime`
+rem  (the CPU distribution). Once onnxruntime-gpu is present, pip treats that
+rem  requirement as satisfied and does NOT pull the CPU build in as well.
+rem
+rem  Bonus effect: a machine with no usable GPU still ends up with a working
+rem  CPU setup from this single command -- the safest possible outcome.
+echo [4/6] Ensuring the OCR baseline ^(rapidocr, pymupdf^)...
+call :install_baseline
+if errorlevel 1 goto :fail
+echo.
+
+rem ---- 5/6. GPU runtime ------------------------------------------------------
+echo [5/6] About to install:  %ORT_SPEC%
 echo       from index:       !CUDA_INDEX!
 echo.
 if defined PRE (
@@ -176,7 +198,7 @@ if errorlevel 1 (
 echo.
 
 rem ---- 5. verify ------------------------------------------------------------
-echo [5/5] Verifying...
+echo [6/6] Verifying...
 %PY% -c "import onnxruntime as o;s=o.get_available_providers();print('PYVER',o.__version__);print('PROVIDERS','|'.join(s));print('HASCUDA','CUDAExecutionProvider' in s)"
 if errorlevel 1 (
   echo [X] onnxruntime could not be imported after install. Application will
@@ -223,6 +245,30 @@ goto :end
 :fail
 echo.
 exit /b 1
+
+rem ---------------------------------------------------------------------------
+rem  :install_baseline
+rem  Install what OCR needs regardless of GPU: rapidocr (the actual recognizer)
+rem  and pymupdf (PDF -> bitmap). onnxruntime alone does nothing.
+rem
+rem  Installed together with the GPU package, pip will NOT also pull the CPU
+rem  onnxruntime: rapidocr's dependency on `onnxruntime` is already satisfied by
+rem  onnxruntime-gpu (same import name, same target directory).
+rem
+rem  Returns errorlevel 1 on failure, 0 otherwise (including the --check no-op).
+rem ---------------------------------------------------------------------------
+:install_baseline
+if defined PRE (
+  echo       --check: skipping.
+  exit /b 0
+)
+%PY% -m pip install --upgrade --disable-pip-version-check rapidocr pymupdf
+if errorlevel 1 (
+  echo.
+  echo [X] Could not install rapidocr / pymupdf. Check the network, then retry.
+  exit /b 1
+)
+exit /b 0
 
 rem ---------------------------------------------------------------------------
 rem  :try_python <exe> <extra-args>

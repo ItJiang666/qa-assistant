@@ -74,8 +74,31 @@ fi
 
 PYARCH=$("$PY" -c 'import platform;print(platform.machine())' 2>/dev/null | tr -d '\r')
 PYPATH=$("$PY" -c 'import sys;print(sys.executable)' 2>/dev/null | tr -d '\r')
-echo "[1/5] Python：$PYVER（$PYARCH）"
+echo "[1/6] Python：$PYVER（$PYARCH）"
 echo "      解释器：$PYPATH"
+
+# ---------------------------------------------------------------------------
+#  install_baseline —— 无论有没有 GPU 都要装的部分
+#
+#  onnxruntime 只是**推理后端**：真正认字的是 `rapidocr`，把 PDF 拆成位图的
+#  是 `pymupdf`。只装 onnxruntime-gpu 的机器依然做不了 OCR。
+#  所以基线在这里一并装上 —— 这样"只跑这一个脚本"的机器也能用。
+#
+#  与 GPU 包不冲突：rapidocr 依赖的是 `onnxruntime`（CPU 发行版），而
+#  onnxruntime-gpu 与它**同名同目录**，pip 视为已满足，不会再拉一个 CPU 版进来。
+# ---------------------------------------------------------------------------
+install_baseline() {
+  if [ -n "$PRE" ]; then
+    echo "      --check：跳过基线安装。"
+    return 0
+  fi
+  "$PY" -m pip install --upgrade --disable-pip-version-check rapidocr pymupdf || {
+    echo
+    echo "[X] 装 rapidocr / pymupdf 失败。请检查网络后重试。"
+    return 1
+  }
+  return 0
+}
 
 #  把"装到哪个环境"摆到明面上。
 #  实测踩过：在一个 powershell 会话里把 venv 的 Scripts 前置到 PATH，本想
@@ -98,14 +121,16 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 fi
 
 if [ -z "$DRV" ]; then
-  echo "[2/5] NVIDIA 驱动：未检测到"
+  echo "[2/6] NVIDIA 驱动：未检测到"
   echo
-  echo "[i] 这台机器上没有可用的 NVIDIA 显卡。"
-  echo "    GPU 加速是**可选**的 —— OCR 在 CPU 上照常工作。"
-  echo "    实测参考：38 页扫描件在 CPU 上约 47 秒（v1.28 优化后，比之前快 6.6 倍）。"
+  echo "[i] 这台机器上没有可用的 NVIDIA 显卡，跳过 GPU 运行库"
+  echo "    （否则是白下约 1 GB）。改为安装 CPU 版的 OCR 基线，功能照常可用。"
+  install_baseline || exit 1
+  echo
+  echo "[i] 完成。实测参考：38 页扫描件在 CPU 上约 47 秒（v1.28 优化后，比之前快 6.6 倍）。"
   exit 0
 fi
-echo "[2/5] 显卡：$GPUNAME"
+echo "[2/6] 显卡：$GPUNAME"
 echo "      驱动：$DRV"
 
 DRVMAJOR=$(echo "$DRV" | cut -d. -f1)
@@ -114,9 +139,9 @@ case "$DRVMAJOR" in
 esac
 
 if [ "$DRVMAJOR" -ge 580 ]; then
-  echo "[3/5] CUDA：13（驱动 $DRV ≥ 580）"
+  echo "[3/6] CUDA：13（驱动 $DRV ≥ 580）"
 else
-  echo "[3/5] CUDA：12（驱动 $DRV < 580，改用 CUDA 12 构建）"
+  echo "[3/6] CUDA：12（驱动 $DRV < 580，改用 CUDA 12 构建）"
   CUDA_INDEX="https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"
   ORT_SPEC="onnxruntime-gpu==1.29.0"
 fi
@@ -128,18 +153,25 @@ case "$GPUNAME" in
     echo
     echo "[i] 这个代次的显卡（GTX 10 系及更早）已不被 onnxruntime-gpu 依赖的"
     echo "    CUDA 运行库支持：装得进去，但 CUDAExecutionProvider 起不来。"
-    echo "    建议继续用 CPU 路径 —— 它不需要任何额外下载。"
+    echo "    所以跳过它，改为安装 CPU 版 OCR 基线。"
+    install_baseline || exit 1
     exit 0
     ;;
 esac
 
 if [ "$TARGET" = "cpu" ]; then
-  echo "[i] 指定了 --cpu：跳过安装。"
+  echo "[i] 指定了 --cpu：跳过 GPU 运行库，只装 CPU 版 OCR 基线。"
+  install_baseline || exit 1
   exit 0
 fi
 
-# ---- 4. 安装 ----------------------------------------------------------------
-echo "[4/5] 准备安装：$ORT_SPEC"
+# ---- 4. OCR 基线（无论有没有 GPU 都必须装）----------------------------------
+echo "[4/6] 安装 OCR 基线（rapidocr、pymupdf）..."
+install_baseline || exit 1
+echo
+
+# ---- 5. GPU 运行库 ----------------------------------------------------------
+echo "[5/6] 准备安装：$ORT_SPEC"
 echo "      索引源：  $CUDA_INDEX"
 echo
 if [ -n "$PRE" ]; then
@@ -160,7 +192,7 @@ fi
 echo
 
 # ---- 5. 验证 ----------------------------------------------------------------
-echo "[5/5] 验证中……"
+echo "[6/6] 验证中……"
 "$PY" - <<'PYEOF'
 import sys
 try:
