@@ -99,6 +99,10 @@ cp docs/ACCEPTANCE.md "$STAGE/docs/"
 cp deploy/ollama/Modelfile.qa-embed "$STAGE/deploy/ollama/"
 cp deploy/ocr/qa_ocr.py            "$STAGE/deploy/ocr/"
 cp deploy/ocr/requirements.txt     "$STAGE/deploy/ocr/"
+#  qa_speedtest.py 必须一起发：enable-gpu.sh 会调用它自动挑最快的镜像源。
+#  GPU 运行库 1~1.5 GB，实测各源吞吐差约 18 倍（4.31 MB/s vs 0.24 MB/s），
+#  少了它脚本只能退回官方源，慢网下等于装不完。
+cp deploy/ocr/qa_speedtest.py       "$STAGE/deploy/ocr/"
 
 chmod +x "$STAGE/start.sh" "$STAGE/enable-gpu.sh" "$STAGE/enable-ocr.sh"
 

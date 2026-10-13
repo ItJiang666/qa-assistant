@@ -108,6 +108,13 @@ SRC_INDEX="${QA_GPU_SOURCE:-}"
 PROXY="${QA_GPU_PROXY:-}"
 STEP_RETRIES="${QA_GPU_RETRIES:-3}"
 
+#  自动选源：每个候选下载多少 MB 来测速。2 MB × 4 个源约 5~10 秒，
+#  换来的是"下 1.5 GB 用 6 分钟还是 2 小时"的区别，很划算。
+SPEEDTEST_MB="${QA_GPU_SPEEDTEST_MB:-2}"
+
+#  脚本所在目录（用于定位 deploy/ocr/qa_speedtest.py）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 #  pip 的网络参数。默认 --timeout 15 秒对 400 MB 的包太短：
 #  慢网下一次卡顿就整包重来，这是把 `--timeout 60` 提上来的原因。
 PIP_NET_OPTS="--retries 10 --timeout 60"
@@ -146,12 +153,12 @@ install_baseline() {
 #
 #  规则：
 #    * 指定了 --source 时，用它当**主源**（--index-url），另外再挂上 PyPI 官方
-#      当补充源（--extra-index-url）。CUDA 运行库在 pypi.org 上也有，两边都留
-#      着才能保证解析得出来；实测清华镜像四件套齐全。
-#    * 没指定源时：主源就是默认的 PyPI，NVIDIA 的包从 pypi.nvidia.com 取。
+#      当补充源（--extra-index-url），两边都留着才能保证解析得出来。
+#    * 没指定源时：由 auto_pick_source() **实测挑一个最快的**（见下），
+#      挑不出来才回退"官方 PyPI + NVIDIA 源"。
 #
 #  注意 --index-url 的优先级**高于**环境变量与 pip.conf，所以只有在用户明确
-#  要换源时才传它 —— 否则会悄悄覆盖用户自己的配置。
+#  要换源、或自动挑源挑出了结果时才传它 —— 否则会悄悄覆盖用户自己的配置。
 # ---------------------------------------------------------------------------
 pip_args() {
   if [ -n "$SRC_INDEX" ]; then
@@ -163,6 +170,64 @@ pip_args() {
   echo "$PIP_NET_OPTS"
   pip_supports_resume && echo "--resume-retries 5"
   return 0
+}
+
+# ---------------------------------------------------------------------------
+#  auto_pick_source —— 实测各镜像速度，挑最快的那个当安装源
+#
+#  为什么必须做：GPU 运行库那套很大（实测 cu13 约 1.05 GB、cu12 约 1.49 GB），
+#  而各源吞吐差很多。本机实测（2026-10-13，同一个 527 MB 轮子各取 3 MB）：
+#      中科大 4.31 ｜ 腾讯云 3.63 ｜ 清华 0.81 ｜ PyPI 官方 0.24  (MB/s)
+#  按 1.49 GB 算：最快的约 6 分钟，官方源要约 1.8 小时；某些网络下官方源只有
+#  0.02 MB/s，那是 20 小时以上 —— 等于装不完。所以"选对源"不是优化，是能不能
+#  装完的分界线。
+#
+#  测速逻辑放在 deploy/ocr/qa_speedtest.py（随交付包一起发），.sh 与 .cmd 共用，
+#  避免两份实现各自漂移。
+# ---------------------------------------------------------------------------
+auto_pick_source() {
+  local script="${SCRIPT_DIR:-.}/deploy/ocr/qa_speedtest.py"
+  #  找不到就往上找一层（脚本被单独拷出来用时）
+  [ -f "$script" ] || script="$SCRIPT_DIR/qa_speedtest.py"
+  if [ ! -f "$script" ]; then
+    echo "[i] 没找到 qa_speedtest.py，跳过自动选源（将用官方源）。"
+    return 0
+  fi
+  echo "[i] 正在实测各镜像速度（每个源最多下 $SPEEDTEST_MB MB，约 5~10 秒）..."
+  local best
+  best=$(PYTHONIOENCODING=utf-8 "$PY" "$script" --limit-mb "$SPEEDTEST_MB" 2>/dev/null \
+         | sed -n 's/^BEST\t//p' | head -n1 | tr -d '\r')
+  if [ -z "$best" ]; then
+    echo "[i] 没测出可用镜像，回退官方源。"
+    return 0
+  fi
+  SRC_INDEX="$best"
+  echo "[OK] 已选安装源：$SRC_INDEX"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+#  install_tier_with_fallback <代号> —— 先按选定源装；失败且选的是镜像时，
+#  自动改用官方源（PyPI + NVIDIA）再试一次。
+#
+#  为什么值得多这一层：镜像偶尔会缺某个版本、或同步到一半。没有这层的话
+#  用户只看到"安装失败"，然后得自己摸索着换源；有了它，脚本自己就绕过去了。
+#  换源前清一次 pip 缓存，避免把镜像下的坏包/半包复用到官方源上。
+# ---------------------------------------------------------------------------
+install_tier_with_fallback() {
+  local code="$1"
+  if install_tier "$code"; then
+    return 0
+  fi
+  if [ -z "$SRC_INDEX" ] || [ "$SRC_INDEX" = "$PYPI_INDEX" ]; then
+    return 1
+  fi
+  echo
+  echo "[!] 用 $SRC_INDEX 安装失败，改用官方源（PyPI + NVIDIA）重试一次..."
+  echo "    已清掉 pip 缓存里的临时文件，避免把下坏的包带过去。"
+  "$PY" -m pip cache purge >/dev/null 2>&1 || true
+  SRC_INDEX=""
+  install_tier "$code"
 }
 
 # ---------------------------------------------------------------------------
@@ -570,13 +635,24 @@ EOF
 
   echo "[5/6] 将按顺序尝试这些档位：$CANDIDATES"
   echo "      说明：驱动下限只用来决定'值不值得试'，能不能用由**真建会话**裁决。"
-  echo "      索引源：${SRC_INDEX:-$NVIDIA_INDEX}"
   echo "      网络  ：$PIP_NET_OPTS$(pip_supports_resume && echo ' --resume-retries 5')"
   echo
   if [ -n "$PRE" ]; then
     echo "[i] --check：只做检测，不安装。去掉 --check 即真正执行。"
+    echo "    （自动选源与探源也会跳过，避免 --check 还要下几 MB 测速）"
     exit 0
   fi
+
+  #  没指定 --source 时，实测挑一个最快的源。
+  #  这一步是 v1.33 加的：GPU 包 1~1.5 GB，各源实测差十几倍，
+  #  默认用官方源在慢网下等于装不完。
+  if [ -z "$SRC_INDEX" ]; then
+    auto_pick_source
+  else
+    echo "[i] 使用命令行指定的源：$SRC_INDEX"
+  fi
+  echo "      索引源：${SRC_INDEX:-$NVIDIA_INDEX（官方）}"
+  echo
 
   #  装之前先探源：不可达就立刻说清楚，而不是让人等十几分钟再看到一堆超时。
   if ! check_source "${SRC_INDEX:-$NVIDIA_INDEX}"; then
@@ -599,7 +675,7 @@ EOF
     if [ "$TIER_TRIED" -gt 1 ]; then
       purge_gpu_packages
     fi
-    if ! install_tier "$code"; then
+    if ! install_tier_with_fallback "$code"; then
       echo
       echo "[!] $(tier_field "$code" 2) 的包没装上（网络或源的问题）。"
       echo "    重试也不会从头下载：已下完的包都在 pip 缓存里。"

@@ -131,6 +131,14 @@ rem  (The GPU package list now lives in the TIER_FILE table written above --
 rem   one list per tier, because each tier needs a different CUDA generation.)
 set "GPUN_FILE=%TEMP%\qa-gpu-name.txt"
 
+rem  Auto source selection: the winning index is written to a temp FILE and read
+rem  back from there. Why a file instead of parsing the child's stdout: the
+rem  picker prints Chinese in UTF-8 while cmd's `for /f` decodes with the console
+rem  code page, so parsing stdout yields mojibake. A one-line file avoids that.
+set "SRC_FILE=%TEMP%\qa-gpu-source.txt"
+set "SPEEDTEST_MB=%QA_GPU_SPEEDTEST_MB%"
+if not defined SPEEDTEST_MB set "SPEEDTEST_MB=2"
+
 rem  Custom source / proxy / retries. NOTE: :parse_args CLEARS SRC_INDEX and
 rem  PROXY, so these environment fallbacks must be (re)applied AFTER parsing --
 rem  otherwise a value set here would be wiped for anyone passing only --check.
@@ -315,19 +323,24 @@ rem ---- 5+6. try tiers in order, self-test each, step down on failure ---------
 echo [5/6] Will try these tiers in order:!CANDIDATES!
 echo       A tier is accepted only if a real CUDA session can be built. The
 echo       driver floor only decides which tiers are worth the download.
-if defined SRC_INDEX (
-  echo       from index: !SRC_INDEX!  ^(custom; pypi.org kept as a supplement^)
-) else (
-  echo       from index: %NVIDIA_INDEX%
-)
-call :pip_args
-echo       network   : %PIP_ARGS%
-for /f "tokens=1" %%c in ("!CANDIDATES!") do call :show_tier "%%c"
 echo.
 if defined PRE (
   echo [i] --check given: NOT installing. Re-run without --check to proceed.
+  echo     ^(auto source selection and the reachability probe are skipped too, so
+  echo      --check does not download a few MB just to measure speed^)
   goto :done_plan
 )
+
+rem  No --source given: measure the mirrors and use the fastest one.
+if not defined SRC_INDEX call :auto_pick_source
+if defined SRC_INDEX (
+  echo       from index: !SRC_INDEX!
+) else (
+  echo       from index: %NVIDIA_INDEX%  ^(official^)
+)
+call :pip_args
+echo       network   : %PIP_ARGS%
+echo.
 
 echo       Downloading up to ~1.5 GB ^(needs a working internet connection^).
 echo       This may take a few minutes. Do not close this window.
@@ -366,7 +379,7 @@ for %%c in (!CANDIDATES!) do (
   rem  SILENT fallback to CPU instead of an error.
   if !TIER_TRIED! GTR 1 call :purge_gpu_tiers
   call :show_tier "%%c"
-  call :pip_retry_tier "%%c"
+  call :install_tier_with_fallback "%%c"
   if errorlevel 1 (
     echo.
     echo [!] Tier %%c could not be installed ^(network or source^).
@@ -576,28 +589,11 @@ echo       removing the previous CUDA generation ^(avoid mixing DLLs^)...
 exit /b 0
 
 rem ---------------------------------------------------------------------------
-rem  :pip_retry_tier <code>   install one tier, with the outer retry loop
-rem
-rem  *** MEASURED TRAP *** the packages must be passed UNQUOTED. Writing
-rem  `call :pip_retry "!T_ORT! !T_DEPS!"` makes %* a SINGLE quoted string, so pip
-rem  receives one bogus requirement and fails with
-rem      Invalid requirement: 'onnxruntime-gpu==1.19.2 nvidia-cudnn-cu11~=9.0 ...'
-rem  That failure looked exactly like "this tier does not work", which is the
-rem  dangerous part: the fallback loop then blamed the tier instead of the bug.
-rem ---------------------------------------------------------------------------
-:pip_retry_tier
-call :tier_field "%~1" 5
-set "T_ORT=!TIER_FIELD!"
-call :tier_field "%~1" 6
-set "T_DEPS=!TIER_FIELD!"
-call :pip_retry !T_ORT! !T_DEPS!
-exit /b %errorlevel%
-
-rem ---------------------------------------------------------------------------
 rem  :run_probe   run the self-test file and set PROBE_RC
+rem
 rem  Nothing may sit between the run and the capture: `set` and `del` overwrite
 rem  errorlevel, and a mis-captured exit code once made a broken check report
-rem  success in this project.
+rem  success in this project. Hence this deliberately tiny subroutine.
 rem ---------------------------------------------------------------------------
 :run_probe
 %PY% "%PROBE%"
@@ -759,6 +755,83 @@ if not "!CHK_RC!"=="0" (
 )
 echo       reachable
 exit /b 0
+
+rem ---------------------------------------------------------------------------
+rem  :auto_pick_source
+rem  Measure the candidate mirrors and set SRC_INDEX to the fastest one.
+rem
+rem  Why this exists: the GPU runtime is large (measured: cu13 ~1.05 GB,
+rem  cu12 ~1.49 GB) and throughput varies enormously between sources. Measured on
+rem  one machine on 2026-10-13, same 527 MB wheel, first 3 MB each:
+rem      USTC 4.31 | Tencent 3.63 | Tsinghua 0.81 | PyPI official 0.24  (MB/s)
+rem  At 1.49 GB that is about 6 minutes versus about 1.8 hours; on some networks
+rem  the official source runs at 0.02 MB/s, which is over 20 hours -- the install
+rem  simply never finishes. So picking the source is not an optimisation, it is
+rem  the difference between working and not.
+rem
+rem  The probing logic lives in deploy\ocr\qa_speedtest.py so that .sh and .cmd
+rem  share one implementation instead of drifting apart.
+rem ---------------------------------------------------------------------------
+:auto_pick_source
+set "PICKER=%~dp0deploy\ocr\qa_speedtest.py"
+if not exist "%PICKER%" set "PICKER=%~dp0qa_speedtest.py"
+if not exist "%PICKER%" (
+  echo [i] qa_speedtest.py not found; skipping auto source selection.
+  exit /b 0
+)
+del "%SRC_FILE%" >nul 2>nul
+echo [i] Measuring mirror speed ^(up to %SPEEDTEST_MB% MB each, ~5-10 s^)...
+set "PYTHONIOENCODING=utf-8"
+%PY% "%PICKER%" --limit-mb %SPEEDTEST_MB% --out "%SRC_FILE%" >nul 2>nul
+set "PYTHONIOENCODING="
+if not exist "%SRC_FILE%" (
+  echo [i] Speed test produced no result; falling back to the official source.
+  exit /b 0
+)
+set "PICKED="
+set /p "PICKED="<"%SRC_FILE%"
+if not defined PICKED (
+  echo [i] No usable mirror found; falling back to the official source.
+  exit /b 0
+)
+set "SRC_INDEX=!PICKED!"
+echo [OK] Selected source: !SRC_INDEX!
+exit /b 0
+
+rem ---------------------------------------------------------------------------
+rem  :install_tier_with_fallback <code>
+rem  Install one tier; if that fails AND a mirror was in use, retry once against
+rem  the official sources (PyPI + NVIDIA).
+rem
+rem  Why the extra layer: mirrors occasionally lag behind or serve a broken
+rem  wheel. Without this the user just sees "install failed" and has to work out
+rem  that switching source is the fix. pip's cache is purged before the retry so
+rem  a half-downloaded file from the mirror is not reused.
+rem ---------------------------------------------------------------------------
+:install_tier_with_fallback
+call :install_tier "%~1"
+if not errorlevel 1 exit /b 0
+if not defined SRC_INDEX exit /b 1
+if /i "!SRC_INDEX!"=="%PYPI_INDEX%" exit /b 1
+echo.
+echo [!] Install failed with !SRC_INDEX!
+echo     Retrying once against the official sources ^(PyPI + NVIDIA^)...
+%PY% -m pip cache purge >nul 2>nul
+set "SRC_INDEX="
+call :install_tier "%~1"
+exit /b %errorlevel%
+
+rem ---------------------------------------------------------------------------
+rem  :install_tier <code>
+rem  One pip install for one tier, via the retry wrapper.
+rem ---------------------------------------------------------------------------
+:install_tier
+call :tier_field "%~1" 5
+set "T_ORT=!TIER_FIELD!"
+call :tier_field "%~1" 6
+set "T_DEPS=!TIER_FIELD!"
+call :pip_retry !T_ORT! !T_DEPS!
+exit /b %errorlevel%
 
 rem ---------------------------------------------------------------------------
 rem  :pip_retry <packages>

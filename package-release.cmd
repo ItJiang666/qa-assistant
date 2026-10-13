@@ -79,6 +79,12 @@ copy /y "docs\ACCEPTANCE.md" "!STAGE!\docs\" >nul
 copy /y "deploy\ollama\Modelfile.qa-embed" "!STAGE!\deploy\ollama\" >nul
 copy /y "deploy\ocr\qa_ocr.py" "!STAGE!\deploy\ocr\" >nul
 copy /y "deploy\ocr\requirements.txt" "!STAGE!\deploy\ocr\" >nul
+rem  qa_speedtest.py must ship too: enable-gpu.cmd calls it to pick the
+rem  fastest mirror. The GPU runtime is 1~1.5 GB and measured throughput
+rem  differs by ~18x between sources (4.31 MB/s vs 0.24 MB/s), so without
+rem  it the script falls back to the official source and may never finish
+rem  on a slow line.
+copy /y "deploy\ocr\qa_speedtest.py" "!STAGE!\deploy\ocr\" >nul
 
 rem 防止误发：.env 绝不能进包（哪怕它存在于工作目录）
 if exist "!STAGE!\.env" del /q "!STAGE!\.env"
