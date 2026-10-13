@@ -253,7 +253,7 @@ python -c "import sys, rapidocr, onnxruntime, pymupdf; print('OCR 依赖就绪')
 > 识别引擎是 [RapidOCR](https://github.com/RapidAI/RapidOCR)（ONNX Runtime + PP-OCR 模型，
 > 模型随 pip 包下发、**不需要运行时下载**），拆页用 PyMuPDF。选它们就是为了"离线可用"。
 
-### 可选：启用 GPU 加速（有独显的话，快 3 倍）
+### 可选：启用 GPU 加速
 
 **不装也能用**，只是慢一些。装了之后同一份 38 页扫描件实测：
 
@@ -281,10 +281,10 @@ python -c "import sys, rapidocr, onnxruntime, pymupdf; print('OCR 依赖就绪')
 
 1. 找到能用的 Python（**会跳过 Microsoft Store 的假 `python3`**），并**打印它将要修改的解释器绝对路径**请你确认
 2. 读 `nvidia-smi`，报出你的显卡型号与驱动版本
-3. 按驱动版本自动选源：**驱动 ≥ 580 用 CUDA 13，更旧用 CUDA 12**；显卡太老则直接改走 CPU
+3. 检查驱动是否够新：**需要 ≥ 580**。不够就**明确告诉你去升级驱动**，并改走 CPU；显卡太老同样直接改走 CPU
 4. **装 OCR 基线**（`rapidocr` + `pymupdf`）
 5. 下载并安装 GPU 运行库（约 1.07 GB）
-6. **验证 `CUDAExecutionProvider` 真的出现**，再给你一句人话结论
+6. **真·自检：用 rapidocr 自带的模型实际建一个 CUDA 会话**，建得起来才报成功
 
 > **为什么第 4 步必须在这里做**：`onnxruntime` 只是**推理后端**，真正认字的是
 > `rapidocr`，拆页的是 `pymupdf`，这两个**不会**被 `onnxruntime-gpu` 带进来。
@@ -298,8 +298,57 @@ python -c "import sys, rapidocr, onnxruntime, pymupdf; print('OCR 依赖就绪')
 > —— 这个坑是实测踩出来的（真的弄坏过一台开发机）。检测到 GPU 版时它只补装
 > `rapidocr` / `pymupdf`。
 
-`--check` 可以只看它打算做什么、不实际安装。
-`enable-gpu.cmd --cpu` 等价于 CPU 版（只装基线，不碰 GPU 运行库）。
+> 🔴 **你需要知道的一段历史（v1.31 修掉的真 bug）**：这个脚本的第一版
+> **在干净机器上装不起来** —— 用户实测"本该下 1 GB，只下了 300 多 MB，而且 GPU
+> 没生效"，而**机器硬件完全够用**。根因有三个，都已修复：
+>
+> 1. 原脚本用 `onnxruntime-gpu[cudnn]` 这个 **extras，实测一个 CUDA 运行库都没
+>    带进来**，只装了 160 MB 的主包（160 + 141 ≈ 300 MB，正是用户看到的数字）。
+>    现在**逐个显式列出**全部四个包。
+> 2. 原脚本有个"驱动 < 580 就改用 CUDA 12 版"的兜底分支 —— **这条路根本走不通**：
+>    实测旧源里那几个版本（1.27/1.28/1.29）元数据声明的仍是 **cu13** 依赖，
+>    名为 12、实要 13。**该分支已删除**，改为明确提示升级驱动。
+> 3. 原脚本只验证"`CUDAExecutionProvider` 在不在列表里"，而**它会在列表里撒谎**：
+>    只装主包时它照样出现，真正建会话才因缺 DLL 静默回落 CPU。现在改为**实际
+>    建一个 CUDA 会话**（约 3 秒）才报成功。
+>
+> 三个根因都做过双向验证：装齐 → `CUDAExecutionProvider` 且通过；把运行库
+> 拿掉 → `CPUExecutionProvider` 且判为失败 —— 后者正是第一版漏掉的那一关。
+
+**可选参数**（不加也能正常装）：
+
+| 参数 | 作用 |
+|---|---|
+| `--check` | 只看它打算做什么，**不安装任何东西** |
+| `--verify` | 也**不安装**，只重跑"真建 CUDA 会话"自检 —— 用来回答"现在到底生效没有" |
+| `--cpu` | 等价于 CPU 版（只装基线，不碰 GPU 运行库） |
+| `--source URL` | 换安装源，例如 `--source https://pypi.tuna.tsinghua.edu.cn/simple` |
+| `--proxy ADDR` | 走代理，例如 `--proxy http://127.0.0.1:7890` |
+| `--retries N` | 某一步失败后重试几次，默认 3（等待 5→10→20 秒） |
+| `--help` | 用法说明 |
+
+也可以在环境变量里给：`QA_GPU_SOURCE` / `QA_GPU_PROXY` / `QA_GPU_RETRIES`（**命令行优先**）。
+
+#### 下载慢、或者装到一半断了怎么办
+
+这是**最常见**的失败方式：那个 CUDA 运行库（`cudnn` 单个就 416 MB）在慢网下很容易断。
+脚本已经内置了这些，但知道为什么有用：
+
+- **pip 的参数已调到实用值**：`--retries 10 --timeout 60 --resume-retries 5`。
+  pip 默认 `--timeout` 只有 **15 秒** —— 对 400 MB 的包太短，慢网下一次卡顿就整包重来。
+  这正是一开始"只下了 300 多 MB"的成因之一。
+- **外层还会再重试**：失败后等 5 / 10 / 20 秒重来，最多 `--retries` 次。
+  **已经下完的包在 pip 缓存里，重试不会从头下。**
+- **装之前先探源**：源不可达会**立刻**告诉你，不让你干等十分钟才看到一堆超时。
+- **换镜像是最有效的**（国内网络尤其如此）：
+  ```cmd
+  enable-gpu.cmd --source https://pypi.tuna.tsinghua.edu.cn/simple
+  ```
+  实测这个源上 `onnxruntime-gpu`、`nvidia-cublas`、`nvidia-cudnn-cu13`、
+  `nvidia-cuda-nvrtc` 四件套都齐全，而且**不再依赖 `pypi.org` 与 `pypi.nvidia.com`
+  的可达性**。指定镜像后脚本仍会把 `pypi.org` 挂成补充源，解析更稳。
+- **要挂代理**：`--proxy http://127.0.0.1:7890`。
+  也可以直接用环境变量 `HTTPS_PROXY`（pip 原生支持）。
 
 #### 我的显卡行不行？
 
@@ -308,7 +357,7 @@ python -c "import sys, rapidocr, onnxruntime, pymupdf; print('OCR 依赖就绪')
 
 | 架构 | 代表卡 | 能用? | 说明 |
 |---|---|---|---|
-| Kepler / Maxwell / Pascal | GTX 750Ti / 960 / **1060** / 1080Ti | ❌ | CUDA 12/13 运行库都已放弃这些代次，装了 CUDA 也起不来。**脚本会提前告诉你，不会让你白下 1 GB** |
+| Kepler / Maxwell / Pascal | GTX 750Ti / 960 / **1060** / 1080Ti | ❌ | CUDA 运行库已放弃这些代次，装了也起不来。**脚本会提前告诉你，不会让你白下 1 GB** |
 | Volta | Titan V | ❌ | 同上 |
 | **Turing** | **GTX 1650** / RTX 2060 / 2080Ti | ✅ | **最低可用线** |
 | Ampere | RTX 3060 / 3070 / 3080 / 3090 | ✅ | |
@@ -317,7 +366,10 @@ python -c "import sys, rapidocr, onnxruntime, pymupdf; print('OCR 依赖就绪')
 
 > 实测依据：`onnxruntime_providers_cuda.dll`（185 MB）里编译进去的算力架构是
 > `sm_30, 70, 75, 80, 86, 89, 90, 100, **120**` —— `sm_120` 就是消费级 50 系。
-> 而 1060/1080Ti 缺的不是内核，是**驱动侧的 CUDA 12/13 支持**（已停止）。
+> 而 1060/1080Ti 缺的不是内核，是**驱动侧的 CUDA 支持**（已停止）。
+
+> **驱动版本是硬门槛：需要 ≥ 580**（CUDA 13 的要求）。旧驱动**没有替代方案** ——
+> 见上面那段历史第 2 条。升级驱动免费，也不需要换显卡。
 
 #### 不要为这个 OCR 升级显卡
 
@@ -342,23 +394,48 @@ CPU↔GPU 搬运与逐行调用上，所以：
 #### 手工安装（不想用脚本时）
 
 ```cmd
-python -m pip install --extra-index-url https://pypi.nvidia.com "onnxruntime-gpu[cudnn]"
+python -m pip install -r deploy\ocr\requirements.txt
+python -m pip install --extra-index-url https://pypi.nvidia.com onnxruntime-gpu nvidia-cudnn-cu13~=9.0 nvidia-cublas nvidia-cuda-nvrtc~=13.0
 ```
 
+> 🔴 **一定要把四个包都写出来，不要用 `onnxruntime-gpu[cudnn]`**：实测这个 extras
+> **一个 CUDA 运行库都不会带进来**，只装 160 MB 的主包，然后 GPU 静默不生效。
+> 四个包合计约 1.07 GB 下载（解压 1.46 GB）—— **只下到 300 MB 左右就是踩了这个坑**。
+>
 > ⚠️ 这会**替换**掉原来那个 CPU 版 `onnxruntime`（两个包同名冲突，只能留一个）。
 > `onnxruntime-gpu` 在没显卡的机器上也**照样能跑**（自动用 CPU），所以不必担心装错。
 > 用国内镜像可能反而更慢 —— 实测某镜像只有 0.14 MB/s，而官方源配加速器能到 8 MB/s。
 
-**装完怎么确认生效**：
+**装完怎么确认真的生效**：
 
 ```cmd
 python -c "import onnxruntime as ort; print(ort.get_available_providers())"
 ```
 
-要看到列表里有 **`CUDAExecutionProvider`**。然后重启服务，随便识别一份文件，
-到日志里搜 `OCR 使用 GPU 加速` —— 出现这行就是真的用上了。
+看到列表里有 **`CUDAExecutionProvider`** 只是**第一步，它不代表能用** ——
+真正要确认的是**能不能建起 CUDA 会话**。跑这段（把 DLL 目录加到 PATH 再建会话）：
 
-**两个容易踩的坑**（本项目都踩过，已在新版脚本里自动处理）：
+```python
+import glob, os, sys
+dirs = []
+for e in sys.path:
+    r = os.path.join(e, "nvidia")
+    if os.path.isdir(r):
+        for pat in ("*/bin", "*/bin/x86_64", "*/*/bin", "*/*/bin/x86_64"):
+            dirs += glob.glob(os.path.join(r, pat))
+os.environ["PATH"] = os.pathsep.join(dirs + [os.environ.get("PATH", "")])
+import onnxruntime as ort, rapidocr
+m = os.path.join(os.path.dirname(rapidocr.__file__), "models", "ch_ppocr_mobile_v2.0_cls_mobile.onnx")
+print(ort.get_available_providers())
+print(ort.InferenceSession(m, providers=["CUDAExecutionProvider"]).get_providers())
+```
+
+第一行有 CUDA、**第二行第一个也是 `CUDAExecutionProvider`** 才算真的好了。
+若第二行变成 `['CPUExecutionProvider']`，说明 CUDA 运行库没装齐（最常见）或驱动太旧。
+
+然后重启服务，随便识别一份文件，到日志里搜 `OCR 使用 GPU 加速` —— 出现这行就是真的用上了。
+
+**三个容易踩的坑**（本项目都踩过，已在新版脚本里自动处理）：
 
 - **光装包还不够**：CUDA 的依赖 DLL（`cublasLt64_13.dll`、`cudnn64_9.dll`）落在
   `site-packages\nvidia\**\bin` 下，**不在系统 PATH 上**。不在 PATH 上时
@@ -366,6 +443,11 @@ python -c "import onnxruntime as ort; print(ort.get_available_providers())"
   onnxruntime **之前**自动把这些目录加进 PATH。**这也是为什么"装完没变快"最常见
   的原因不是装错，而是没生效** —— 用 `--check` 或看日志里的 `OCR 使用 CPU: 原因=…`
   就能立刻分辨。
+- **别信 `get_available_providers()`**：它只表示执行器**注册**了，不代表**能加载**。
+  只装了主包、CUDA 运行库缺失时，它照样把 `CUDAExecutionProvider` 列出来，而建会话
+  会失败并**静默回落 CPU**（onnxruntime 自己的报错是
+  `Error loading "onnxruntime_providers_cuda.dll" which depends on "cublasLt64_13.dll" which is missing`）。
+  **判断标准只有一个：建一个会话，看 `session.get_providers()[0]`。**
 - **别用 `os.add_dll_directory()` 或"装完再改 PATH"**：前者 onnxruntime 加载
   执行器时不走那个搜索路径，后者太晚（它在 import 那一刻就注册执行器）。
 

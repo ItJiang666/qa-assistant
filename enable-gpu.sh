@@ -2,87 +2,225 @@
 # ============================================================================
 #  enable-gpu.sh —— qa-assistant OCR 的 GPU 加速一键安装
 # ============================================================================
-#  为什么是脚本而不是预打包：
-#    GPU 运行库解压后约 1.46 GB，而且**与 Python ABI 严格绑定**
-#    （cp311 / cp312 / cp313 …）。预打包只能服务"Python 版本恰好相同"的人，
-#    而用户机器上是什么版本我们无从得知。脚本的做法是识别环境后让 pip 去取
-#    对应构建，因此用户是什么环境都能装上。
-#
 #  脚本做六件事：
 #    1. 找到能用的 Python（会跳过 Microsoft Store 的假 python3），并打印
 #       它将要修改的解释器**绝对路径**请你确认
 #    2. 查 NVIDIA 驱动（nvidia-smi）与显卡代次
-#    3. 选 CUDA 13 源（默认）或 CUDA 12 源（旧卡）；显卡太老则直接改走 CPU
-#    4. 安装 OCR 基线（rapidocr + pymupdf）—— 与显卡无关，但少了它 OCR 不能用
-#    5. 安装 onnxruntime-gpu + CUDA/cuDNN 运行库
-#    6. **验证** CUDAExecutionProvider 是否真的出现，并给出人话结论
+#    3. 判断驱动能否带动 CUDA 13；不能则**明确说清并改走 CPU**
+#    4. 安装 OCR 基线（rapidocr + pymupdf）
+#    5. 安装 onnxruntime-gpu **以及显式列出的 CUDA/cuDNN 运行库**
+#    6. **真·自检**：用 rapidocr 自带的模型建一个 CUDA 会话，确认它真的能用
+#
+#  ═══════════════════════════════════════════════════════════════════════════
+#  ⚠️ 这份脚本的第一版在干净机器上**失败过**（用户实测：只下了 300 多 MB、
+#     GPU 没生效）。下面三条是那次事故的根因，改动前务必先读：
+#
+#  ① **不要依赖 `onnxruntime-gpu[cudnn]` 这种 extras**。
+#     实测干净机器上 pip 只装了 160 MB 的 onnxruntime-gpu，**一个 CUDA 运行库
+#     都没拉** —— 而 CUDA 13 那套（cudnn 416 MB + nvrtc 45 MB + …）是必需的。
+#     160 + 141 ≈ 300 MB，正是用户看到的数字。
+#     现在改为**显式列出**每一个包，不把关键依赖交给 extras 解析。
+#     必须显式装的原因：只装 onnxruntime-gpu 时，
+#     `get_available_providers()` **仍然会列出 CUDAExecutionProvider**
+#     （它只是注册了），但建会话时 DLL 加载失败、**静默回落 CPU** ——
+#     不报错，只是没变快，极难察觉。
+#
+#  ② **驱动 < 580 的"CUDA 12 兜底"是个陷阱，已删除**。
+#     实测：Azure 那个 onnxruntime-cuda-12 源里虽然列着 1.27/1.28/1.29，
+#     但它们的元数据声明的依赖全是 `nvidia-*-cu13` —— 名字叫 12、要的是 13，
+#     自相矛盾，按那条路走永远配不好。真正的 CUDA 12 构建只到 1.19 附近。
+#     所以现在：驱动 < 580 → **明确告知并改走 CPU**，不再假装能装。
+#
+#  ③ **必须真建一个会话才算验证通过**。
+#     `get_available_providers()` 有 CUDA 不等于能用（见①）。
+#     现在用 rapidocr 自带的 ch_ppocr_mobile_v2.0_cls_mobile.onnx（0.56 MB）
+#     建一个 CUDA 会话，看 `session.get_providers()` 的第一项是不是它 ——
+#     实测本机 2.95 秒完成，代价可接受。
+#  ═══════════════════════════════════════════════════════════════════════════
 #
 #  用法：
-#    bash enable-gpu.sh            # 安装
-#    bash enable-gpu.sh --check    # 只看它打算做什么，不安装
-#    bash enable-gpu.sh --cpu      # 只装 CPU 版 OCR（不碰 GPU 运行库）
+#    bash enable-gpu.sh                    # 安装
+#    bash enable-gpu.sh --check            # 只看它打算做什么，不安装
+#    bash enable-gpu.sh --verify           # 不安装，只跑"真建 CUDA 会话"自检
+#    bash enable-gpu.sh --cpu              # 只装 CPU 版 OCR（不碰 GPU 运行库）
+#    bash enable-gpu.sh --source URL       # 换安装源（见下）
+#    bash enable-gpu.sh --proxy URL        # 走代理（也可用环境变量 HTTPS_PROXY）
+#    bash enable-gpu.sh --retries N        # 每步重试次数，默认 3（失败等待逐次翻倍）
 #
-#  只想要 CPU 版、不需要 GPU？直接用 enable-ocr.sh 更省事。
+#  ⚠️ 下载慢 / 装到一半断了怎么办（这一版重点加的东西）：
+#    * pip 自己带断点续传与重试，本脚本把参数拉到实用值：
+#      `--retries 10 --timeout 60 --resume-retries 5`。默认的 `--timeout 15`
+#      对 400 MB 的包太短，慢网下会被反复掐断 —— 那次"只下了 300 多 MB"
+#      就有这个因素。
+#    * 外层再包一层重试：失败后等 5/10/20 秒重来，最多 --retries 次。
+#      已下完的包在 pip 缓存里，重试不会从头下。
+#    * **换镜像源**（国内网络最有效）：
+#        bash enable-gpu.sh --source https://pypi.tuna.tsinghua.edu.cn/simple
+#      实测清华镜像上 `nvidia-cublas` / `nvidia-cudnn-cu13` / `nvidia-cuda-nvrtc`
+#      / `onnxruntime-gpu` 都齐全，且 is 主源（不再依赖 pypi.org 与
+#      pypi.nvidia.com 的可达性）。CUDA 包在 PyPI 官方也有备份，所以指定镜像后
+#      脚本仍会把 pypi.org 作为补充源。
+#    * 代理：`--proxy http://127.0.0.1:7890`，或直接设 HTTPS_PROXY（pip 原生支持）。
+#    * 安装前会先探测源是否可达，不可达就**立刻**告诉你，不会让你等十几分钟才失败。
 #
-#  说明：本文件用 UTF-8 + LF。与 .cmd 不同，bash 对 UTF-8 中文没问题。
+#  说明：本文件用 UTF-8 + LF。
 # ============================================================================
 
 set -u
 
-ORT_SPEC="onnxruntime-gpu[cudnn]"
-CUDA_INDEX="https://pypi.nvidia.com"
 PRE=""
 TARGET=""
+VERIFY_ONLY=""
 PY=""
 PYVER=""
 PYARCH=""
+
+#  驱动下限：CUDA 13 要求 >= 580。低于它只能走 CPU（原因见上面 ②）。
+CUDA13_MIN_DRIVER=580
+
+#  GPU 运行时：**显式列出，不用 extras**（原因见上面 ①）。
+#  版本约束与实测通过的那套一致：onnxruntime-gpu 1.31.0 + cudnn-cu13 9.27 + cublas 13.8 + nvrtc 13.4。
+GPU_PACKAGES="onnxruntime-gpu nvidia-cudnn-cu13~=9.0 nvidia-cublas nvidia-cuda-nvrtc~=13.0"
+NVIDIA_INDEX="https://pypi.nvidia.com"
+PYPI_INDEX="https://pypi.org/simple"
+
+#  自定义源/代理/重试（命令行或环境变量，命令行优先）
+SRC_INDEX="${QA_GPU_SOURCE:-}"
+PROXY="${QA_GPU_PROXY:-}"
+STEP_RETRIES="${QA_GPU_RETRIES:-3}"
+
+#  pip 的网络参数。默认 --timeout 15 秒对 400 MB 的包太短：
+#  慢网下一次卡顿就整包重来，这是把 `--timeout 60` 提上来的原因。
+PIP_NET_OPTS="--retries 10 --timeout 60"
+
+#  pip 26 才有 --resume-retries（断点续传）；老 pip 不认识这个参数会直接报错，
+#  所以先探测再用，不能硬写上去。
+pip_supports_resume() {
+  "$PY" -m pip install --help 2>/dev/null | grep -q -- '--resume-retries'
+}
 
 # ---------------------------------------------------------------------------
 #  install_baseline —— 无论有没有 GPU 都要装的部分
 #
 #  onnxruntime 只是**推理后端**：真正认字的是 `rapidocr`，把 PDF 拆成位图的
 #  是 `pymupdf`。只装 onnxruntime-gpu 的机器依然做不了 OCR。
-#  所以基线在这里一并装上 —— 这样"只跑这一个脚本"的机器也能用。
 #
-#  与 GPU 包不冲突：rapidocr 依赖的是 `onnxruntime`（CPU 发行版），而
-#  onnxruntime-gpu 与它**同名同目录**，pip 视为已满足，不会再拉一个 CPU 版进来。
+#  这里**不写 onnxruntime 这个名字**：rapidocr 依赖的 `onnxruntime` 与
+#  `onnxruntime-gpu` 同名同目录，写上去会把已装的 GPU 版降级成 CPU 版。
 # ---------------------------------------------------------------------------
 install_baseline() {
   if [ -n "$PRE" ]; then
     echo "      --check：跳过基线安装。"
     return 0
   fi
-  echo "      命令：$PY -m pip install rapidocr pymupdf"
-  "$PY" -m pip install --upgrade --disable-pip-version-check rapidocr pymupdf || {
-    echo
-    echo "[X] 装 rapidocr / pymupdf 失败。请检查网络后重试。"
+  # shellcheck disable=SC2086
+  pip_retry "装 OCR 基线（rapidocr / pymupdf）" "$PY" -m pip install --upgrade \
+    --disable-pip-version-check $PIP_NET_OPTS rapidocr pymupdf || {
+    echo "[X] 装 rapidocr / pymupdf 失败。请检查网络（或换源、挂代理）后重试。"
     return 1
   }
   return 0
 }
 
 # ---------------------------------------------------------------------------
-#  find_python —— 找到并**实际执行验证**一个可用的 Python，设置 PY / PYVER / PYARCH
+#  pip_args —— 攒出 pip 的"源 + 代理 + 网络参数"
 #
-#  ⚠️ 必须实际执行验证，不能只 `command -v`。
-#     实测踩到：Windows 上装了 Store 版 Python 时，PATH 里会有一个
-#     `WindowsApps/python3` 跳转存根 —— `command -v` 找得到它，但一执行就失败。
-#     只按"找得到"就选用的话，脚本会对着一台明明装了 Python 的机器报
-#     "这个 Python 跑不起来"，而用户完全不知道该删哪个。
+#  规则：
+#    * 指定了 --source 时，用它当**主源**（--index-url），另外再挂上 PyPI 官方
+#      当补充源（--extra-index-url）。CUDA 运行库在 pypi.org 上也有，两边都留
+#      着才能保证解析得出来；实测清华镜像四件套齐全。
+#    * 没指定源时：主源就是默认的 PyPI，NVIDIA 的包从 pypi.nvidia.com 取。
+#
+#  注意 --index-url 的优先级**高于**环境变量与 pip.conf，所以只有在用户明确
+#  要换源时才传它 —— 否则会悄悄覆盖用户自己的配置。
+# ---------------------------------------------------------------------------
+pip_args() {
+  if [ -n "$SRC_INDEX" ]; then
+    echo "--index-url $SRC_INDEX --extra-index-url $PYPI_INDEX"
+  else
+    echo "--extra-index-url $NVIDIA_INDEX"
+  fi
+  [ -n "$PROXY" ] && echo "--proxy $PROXY"
+  echo "$PIP_NET_OPTS"
+  pip_supports_resume && echo "--resume-retries 5"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+#  pip_retry <描述> <pip 命令...> —— 失败重试，等待 5/10/20 秒
+#
+#  为什么要外层再包一层（pip 自己已经有 --retries）：
+#  pip 的 --retries 管的是**单个请求**，而一次 1 GB 的安装会发很多请求。
+#  中途整体失败（连接被掐、超时、镜像抖动）时 pip 直接退出，人得手动重跑。
+#  已下完的 wheel 在 pip 缓存里，所以重试的代价只是重试的那部分。
+# ---------------------------------------------------------------------------
+pip_retry() {
+  local desc="$1"; shift
+  local attempt=1 wait_s=5
+  local max="$STEP_RETRIES"
+  case "$max" in ''|*[!0-9]*) max=3 ;; esac
+
+  while :; do
+    echo "      命令：$*"
+    if "$@"; then
+      return 0
+    fi
+    if [ "$attempt" -ge "$max" ]; then
+      echo
+      echo "[X] $desc 失败，已重试 $max 次。"
+      return 1
+    fi
+    echo
+    echo "[!] $desc 第 $attempt 次失败，${wait_s} 秒后重试（已下载的部分会复用）..."
+    sleep "$wait_s"
+    attempt=$((attempt + 1))
+    wait_s=$((wait_s * 2))
+  done
+}
+
+# ---------------------------------------------------------------------------
+#  check_source —— 安装前先探源，不可达就立刻说，不让人干等
+# ---------------------------------------------------------------------------
+check_source() {
+  local url="$1"
+  echo -n "      探测安装源可达性：$url ... "
+  if "$PY" - "$url" <<'PYEOF'
+import sys, urllib.request
+url = sys.argv[1]
+try:
+    req = urllib.request.Request(url, method='HEAD')
+    urllib.request.urlopen(req, timeout=20)
+except Exception as exc:
+    try:
+        # 有些源不支持 HEAD，用 GET 再试一次（只读 1 字节）
+        urllib.request.urlopen(url, timeout=20).read(1)
+    except Exception:
+        print(type(exc).__name__)
+        sys.exit(1)
+PYEOF
+  then
+    echo "可达"
+    return 0
+  fi
+  echo "不可达"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+#  find_python —— 找到并**实际执行验证**一个可用的 Python
+#
+#  ⚠️ 必须实际执行验证，不能只 `command -v`：Windows 上装了 Store 版 Python 时，
+#     PATH 里有个 `WindowsApps/python3` 跳转存根，找得到但执行失败。
 # ---------------------------------------------------------------------------
 find_python() {
   PY=""
   PYVER=""
   for cand in python3 python; do
     command -v "$cand" >/dev/null 2>&1 || continue
-    probe=$("$cand" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null | tr -d '\r')
+    probe=$("$cand" -c 'import sys;print(sys.version.split()[0])' 2>/dev/null | tr -d '\r')
     case "$probe" in
-      [0-9]*.[0-9]*)
-        PY="$cand"; PYVER="$probe"; break
-        ;;
-      *)
-        echo "[i] 跳过不可用的 $cand（$cand 存在但执行失败，可能是 Store 跳转存根）"
-        ;;
+      [0-9]*.[0-9]*) PY="$cand"; PYVER="$probe"; break ;;
+      *) echo "[i] 跳过不可用的 $cand（存在但执行失败，可能是 Store 跳转存根）" ;;
     esac
   done
   [ -n "$PY" ] || return 1
@@ -91,17 +229,25 @@ find_python() {
 }
 
 # ---------------------------------------------------------------------------
-#  confirm_target —— 把"装到哪个环境"摆到明面上
-#
-#  实测踩过：在一个 powershell 会话里把 venv 的 Scripts 前置到 PATH，本想
-#  隔离测试，结果 cmd 解析 python 时主环境胜出 —— 依赖装进了主环境。
-#  所以这里显式打印绝对路径，并在交互环境下给一次反悔机会。
-#  自动化场景可设 QA_GPU_YES=1 跳过询问。
+#  python_too_old —— OCR 那套依赖要 Python 3.10+（与 .cmd 版同一道门槛）
+#  早点说清楚，比让 pip 抛一屏解析失败好得多。
+# ---------------------------------------------------------------------------
+python_too_old() {
+  local maj min
+  maj=$(echo "$PYVER" | cut -d. -f1)
+  min=$(echo "$PYVER" | cut -d. -f2)
+  case "$maj" in ''|*[!0-9]*) return 0 ;; esac
+  case "$min" in ''|*[!0-9]*) min=0 ;; esac
+  [ "$maj" -lt 3 ] && return 0
+  [ "$maj" -eq 3 ] && [ "$min" -lt 10 ] && return 0
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+#  confirm_target —— 把"装到哪个环境"摆到明面上（可设 QA_GPU_YES=1 跳过）
 # ---------------------------------------------------------------------------
 confirm_target() {
-  local pypath
-  pypath=$("$PY" -c 'import sys;print(sys.executable)' 2>/dev/null | tr -d '\r')
-  echo "      解释器：$pypath"
+  echo "      解释器：$("$PY" -c 'import sys;print(sys.executable)' 2>/dev/null | tr -d '\r')"
   if [ "${QA_GPU_YES:-}" = "1" ] || [ ! -t 0 ]; then
     return 0
   fi
@@ -113,19 +259,82 @@ confirm_target() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+#  gpu_selftest —— 真·自检：建一个 CUDA 会话，而不是只看执行器名单
+#  返回 0 表示真的能用；1 表示不能用。
+#
+#  ⚠️ 下面这段 DLL 目录搜索与 `deploy/ocr/qa_ocr.py` 的 `_nvidia_dll_dirs()`
+#     **刻意保持一致**（四种 glob 布局 + os.path.isdir 过滤）。如果探测的搜索
+#     方式和应用运行时的搜索方式不同，自检通过就不能证明应用能用。
+# ---------------------------------------------------------------------------
+gpu_selftest() {
+  local probe
+  probe=$(mktemp "${TMPDIR:-/tmp}/qa-gpu-probe-XXXXXX.py" 2>/dev/null || echo "/tmp/qa-gpu-probe-$$.py")
+  cat > "$probe" <<'PYEOF'
+import glob, os, sys
+dirs = []
+for entry in sys.path:
+    if not entry or not os.path.isdir(entry):
+        continue
+    root = os.path.join(entry, 'nvidia')
+    if not os.path.isdir(root):
+        continue
+    for pat in ('*/bin', '*/bin/x86_64', '*/*/bin', '*/*/bin/x86_64'):
+        dirs += glob.glob(os.path.join(root, pat))
+dirs = [d for d in dict.fromkeys(dirs) if os.path.isdir(d)]
+print('PROBE nvidia dll dirs: %d' % len(dirs))
+if dirs:
+    os.environ['PATH'] = os.pathsep.join(dirs + [os.environ.get('PATH', '')])
+try:
+    import onnxruntime as ort
+except Exception as e:
+    print('PROBE import onnxruntime failed: %s' % e); sys.exit(1)
+provs = ort.get_available_providers()
+print('PROBE providers: %s' % '|'.join(provs))
+if 'CUDAExecutionProvider' not in provs:
+    print('PROBE CUDA provider not registered'); sys.exit(1)
+try:
+    import rapidocr
+    model = os.path.join(os.path.dirname(rapidocr.__file__),
+                         'models', 'ch_ppocr_mobile_v2.0_cls_mobile.onnx')
+except Exception as e:
+    print('PROBE import rapidocr failed: %s' % e); sys.exit(1)
+if not os.path.exists(model):
+    print('PROBE model missing: %s' % model); sys.exit(1)
+so = ort.SessionOptions()
+so.log_severity_level = 3
+try:
+    sess = ort.InferenceSession(model, sess_options=so,
+                                providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+except Exception as e:
+    print('PROBE session failed: %s' % e); sys.exit(1)
+actual = sess.get_providers()
+print('PROBE session providers: %s' % '|'.join(actual))
+sys.exit(0 if actual and actual[0] == 'CUDAExecutionProvider' else 1)
+PYEOF
+  "$PY" "$probe"
+  local rc=$?
+  rm -f "$probe"
+  return $rc
+}
+
 # ===========================================================================
 #  main
 # ===========================================================================
 main() {
-  for arg in "$@"; do
-    case "$arg" in
-      --check) PRE=1 ;;
-      --cpu)   TARGET=cpu ;;
-      -h|--help)
-        sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
-        exit 0
-        ;;
+  #  逐参数扫描（带值的选项要跳一格，所以用 while 而不是 for）
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --check)   PRE=1 ;;
+      --verify)  VERIFY_ONLY=1 ;;
+      --cpu)     TARGET=cpu ;;
+      --source)  shift; [ $# -gt 0 ] || { echo "[X] --source 后面要跟一个源地址"; exit 1; }; SRC_INDEX="$1" ;;
+      --proxy)   shift; [ $# -gt 0 ] || { echo "[X] --proxy 后面要跟一个代理地址"; exit 1; }; PROXY="$1" ;;
+      --retries) shift; [ $# -gt 0 ] || { echo "[X] --retries 后面要跟次数"; exit 1; }; STEP_RETRIES="$1" ;;
+      -h|--help) sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      *) echo "[X] 不认识的参数：$1（用 --help 看用法）"; exit 1 ;;
     esac
+    shift
   done
 
   echo "============================================================"
@@ -133,127 +342,159 @@ main() {
   echo "============================================================"
   echo
 
-  # ---- 1. 找 Python ---------------------------------------------------------
+  # ---- 1. Python -----------------------------------------------------------
   if ! find_python; then
     echo "[X] 没找到可用的 Python。OCR 功能本身就需要 Python 3.10+，请先安装。"
-    echo "    （GPU 是可选的，不装也照样能用，只是慢一些。）"
     exit 1
   fi
   echo "[1/6] Python：$PYVER（$PYARCH）"
+  if python_too_old; then
+    echo "[X] Python $PYVER 太旧。OCR 这套依赖需要 Python 3.10 或更新。"
+    echo "    装个新 Python，或者继续用 CPU（本脚本不会改动现有环境）。"
+    exit 1
+  fi
+  [ -n "$SRC_INDEX" ] && echo "      安装源：$SRC_INDEX（自定义）"
+  [ -n "$PROXY" ]     && echo "      代理  ：$PROXY"
   confirm_target || exit 0
 
-  # ---- 2. 驱动与显卡 --------------------------------------------------------
+  #  --verify：不装任何东西，只重跑自检，用来回答"现在到底生效了没有"。
+  if [ -n "$VERIFY_ONLY" ]; then
+    echo
+    echo "[verify] 只做自检，不安装任何东西..."
+    if gpu_selftest; then
+      echo
+      echo "[OK] GPU 加速**当前可用**。"
+      exit 0
+    fi
+    echo
+    echo "[!] CUDA 会话建不起来 —— GPU 当前**不生效**（应用会自动用 CPU）。"
+    echo "    重跑本脚本（不加 --verify）即可安装/修复。"
+    exit 1
+  fi
+
+  # ---- 2. 驱动与显卡 -------------------------------------------------------
   local DRV="" GPUNAME=""
   if command -v nvidia-smi >/dev/null 2>&1; then
     DRV=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | tr -d '\r')
     GPUNAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 | tr -d '\r')
   fi
-
   if [ -z "$DRV" ]; then
     echo "[2/6] NVIDIA 驱动：未检测到"
     echo
-    echo "[i] 这台机器上没有可用的 NVIDIA 显卡，跳过 GPU 运行库"
-    echo "    （否则是白下约 1 GB）。改为安装 CPU 版的 OCR 基线，功能照常可用。"
+    echo "[i] 这台机器上没有可用的 NVIDIA 显卡，跳过 GPU 运行库（否则是白下约 1 GB）。"
+    echo "    改为安装 CPU 版 OCR 基线，功能照常可用。"
     install_baseline || exit 1
-    echo
-    echo "[i] 完成。实测参考：38 页扫描件在 CPU 上约 47 秒（v1.28 优化后，比之前快 6.6 倍）。"
     exit 0
   fi
   echo "[2/6] 显卡：$GPUNAME"
   echo "      驱动：$DRV"
 
+  # ---- 3. 驱动是否够新（不够就明确走 CPU，不做"CUDA 12 兜底"）--------------
   local DRVMAJOR
   DRVMAJOR=$(echo "$DRV" | cut -d. -f1)
-  case "$DRVMAJOR" in
-    ''|*[!0-9]*) DRVMAJOR=0 ;;
-  esac
-
-  if [ "$DRVMAJOR" -ge 580 ]; then
-    echo "[3/6] CUDA：13（驱动 $DRV ≥ 580）"
-  else
-    echo "[3/6] CUDA：12（驱动 $DRV < 580，改用 CUDA 12 构建）"
-    CUDA_INDEX="https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"
-    ORT_SPEC="onnxruntime-gpu==1.29.0"
-  fi
-
-  # 很老的卡：CUDA 12 的运行库也已不支持 Maxwell/Pascal，
-  # 装了也用不起来 —— 与其让用户白下 1 GB，不如直接说清。
-  case "$GPUNAME" in
-    *"GTX 10"*|*"GTX 9"*|*"GTX 7"*|*"GT 10"*|*"GT 9"*|*"GT 7"*|*"Quadro K"*|*"Quadro P"*|*"Quadro M"*)
-      echo
-      echo "[i] 这个代次的显卡（GTX 10 系及更早）已不被 onnxruntime-gpu 依赖的"
-      echo "    CUDA 运行库支持：装得进去，但 CUDAExecutionProvider 起不来。"
-      echo "    所以跳过它，改为安装 CPU 版 OCR 基线。"
-      install_baseline || exit 1
-      exit 0
-      ;;
-  esac
+  case "$DRVMAJOR" in ''|*[!0-9]*) DRVMAJOR=0 ;; esac
 
   if [ "$TARGET" = "cpu" ]; then
-    echo "[i] 指定了 --cpu：跳过 GPU 运行库，只装 CPU 版 OCR 基线。"
+    echo "[3/6] 指定了 --cpu：跳过 GPU 运行库。"
     install_baseline || exit 1
     exit 0
   fi
 
-  # ---- 4. OCR 基线（无论有没有 GPU 都必须装）--------------------------------
+  if [ "$DRVMAJOR" -lt "$CUDA13_MIN_DRIVER" ]; then
+    echo "[3/6] 驱动版本不足：$DRV < $CUDA13_MIN_DRIVER"
+    echo
+    echo "[i] onnxruntime-gpu 当前需要的 CUDA 13 运行库要求驱动 ≥ $CUDA13_MIN_DRIVER。"
+    echo "    本脚本**不再提供旧版 CUDA 兜底**：实测旧索引里那几个版本"
+    echo "    （1.27/1.28/1.29）元数据声明的仍是 cu13 依赖，按那条路配不通。"
+    echo "    请**升级 NVIDIA 驱动**后重跑本脚本（升级驱动是免费的，也不需要动显卡）。"
+    echo "    在此之前，先装上 CPU 版 OCR，功能照常可用（38 页约 47 秒）。"
+    install_baseline || exit 1
+    exit 0
+  fi
+
+  # 很老的卡：即使驱动够新，CUDA 运行库也已不支持这些代次
+  case "$GPUNAME" in
+    *"GTX 10"*|*"GTX 9"*|*"GTX 7"*|*"GT 10"*|*"GT 9"*|*"GT 7"*|*"Quadro K"*|*"Quadro P"*|*"Quadro M"*|*"Tesla K"*|*"Tesla P"*)
+      echo
+      echo "[i] 这个代次的显卡（GTX 10 系及更早）不被 CUDA 运行库支持，"
+      echo "    装上也起不来，因此跳过 GPU 运行库，改为安装 CPU 版 OCR 基线。"
+      install_baseline || exit 1
+      exit 0
+      ;;
+  esac
+  echo "[3/6] CUDA：13（驱动 $DRV ≥ $CUDA13_MIN_DRIVER）"
+
+  # ---- 4. OCR 基线 ---------------------------------------------------------
   echo "[4/6] 安装 OCR 基线（rapidocr、pymupdf）..."
   install_baseline || exit 1
   echo
 
-  # ---- 5. GPU 运行库 --------------------------------------------------------
-  echo "[5/6] 准备安装：$ORT_SPEC"
-  echo "      索引源：  $CUDA_INDEX"
+  # ---- 5. GPU 运行库（显式列出）--------------------------------------------
+  echo "[5/6] 安装 GPU 运行库（约 1.07 GB 下载）..."
+  echo "      onnxruntime-gpu  +  nvidia-cudnn-cu13 9.x / nvidia-cublas / nvidia-cuda-nvrtc 13.x"
+  if [ -n "$SRC_INDEX" ]; then
+    echo "      索引源：$SRC_INDEX（自定义，另挂 pypi.org 作补充）"
+  else
+    echo "      索引源：$NVIDIA_INDEX"
+  fi
+  echo "      网络  ：$PIP_NET_OPTS$(pip_supports_resume && echo ' --resume-retries 5')"
   echo
   if [ -n "$PRE" ]; then
     echo "[i] --check：只做检测，不安装。去掉 --check 即真正执行。"
     exit 0
   fi
 
-  echo "      需要下载约 1.07 GB，请保持网络畅通（有加速器会快很多）。"
-  echo
-  "$PY" -m pip install --upgrade --disable-pip-version-check \
-    --extra-index-url "$CUDA_INDEX" "$ORT_SPEC"
-  if [ $? -ne 0 ]; then
+  #  装之前先探源：不可达就立刻说清楚，而不是让人等十几分钟再看到一堆超时。
+  if ! check_source "${SRC_INDEX:-$NVIDIA_INDEX}"; then
     echo
-    echo "[X] 安装失败。常见原因：网络受限、需要代理、或 NVIDIA 源不可达。"
+    echo "[X] 上面这个安装源从本机访问不通，先不开始下载（免得白等）。"
+    echo "    可以试："
+    echo "      1) 换镜像源：bash enable-gpu.sh --source https://pypi.tuna.tsinghua.edu.cn/simple"
+    echo "      2) 走代理  ：bash enable-gpu.sh --proxy http://127.0.0.1:7890"
+    echo "      3) 检查网络/DNS/防火墙后重跑。"
+    echo "    什么都没被弄坏：应用会自动回落到 CPU，照常可用。"
+    exit 1
+  fi
+
+  # shellcheck disable=SC2086
+  if ! pip_retry "安装 GPU 运行库" "$PY" -m pip install --upgrade \
+      --disable-pip-version-check $(pip_args) $GPU_PACKAGES; then
+    echo
+    echo "[X] 安装失败。常见原因：网络受限、需要代理、或源不可达。"
+    echo "    重试也不会从头下载：已下完的包都在 pip 缓存里。"
+    echo "    建议按顺序试："
+    echo "      1) 直接重跑本脚本（镜像抖动多半第二次就好）"
+    echo "      2) 换镜像源：bash enable-gpu.sh --source https://pypi.tuna.tsinghua.edu.cn/simple"
+    echo "      3) 挂代理  ：bash enable-gpu.sh --proxy http://127.0.0.1:7890"
     echo "    什么都没被弄坏：应用会自动回落到 CPU，照常可用。"
     exit 1
   fi
   echo
 
-  # ---- 6. 验证 --------------------------------------------------------------
-  echo "[6/6] 验证中……"
-  "$PY" - <<'PYEOF'
-import sys
-try:
-    import onnxruntime as o
-except Exception as e:
-    print("IMPORTFAIL", e)
-    sys.exit(2)
-provs = o.get_available_providers()
-print("VERSION", o.__version__)
-print("HASCUDA", "YES" if "CUDAExecutionProvider" in provs else "NO")
-print("PROVIDERS", "|".join(provs))
-PYEOF
-  local RC=$?
-
-  echo
-  echo "============================================================"
-  if [ $RC -eq 0 ] && "$PY" -c "import onnxruntime as o,sys;sys.exit(0 if 'CUDAExecutionProvider' in o.get_available_providers() else 1)" 2>/dev/null; then
-    echo "  [OK] GPU 加速已启用。"
+  # ---- 6. 真·自检 ----------------------------------------------------------
+  echo "[6/6] 自检：用 rapidocr 自带的模型建一个 CUDA 会话（约 3 秒）..."
+  if gpu_selftest; then
     echo
-    echo "  重启应用后，随便识别一份扫描件，到日志里搜这一行确认："
-    echo "      OCR 使用 GPU 加速"
+    echo "============================================================"
+    echo "  [OK] GPU 加速已启用，且**已实测建会话成功**。"
+    echo
+    echo "  重启应用后随便识别一份扫描件，到日志里搜「OCR 使用 GPU 加速」确认。"
     echo "  预期效果（38 页扫描件实测）：约 47 秒 → 约 17 秒。"
+    echo "============================================================"
   else
-    echo "  [!] CUDAExecutionProvider 没有出现。"
     echo
-    echo "  应用会自动回落到 CPU —— 什么都没坏，只是没有加速。常见原因："
-    echo "    - 驱动版本太旧，带不动装上的 CUDA 运行库"
-    echo "    - 显卡代次不受支持"
-    echo "  建议先升级 NVIDIA 驱动，再跑一次本脚本。"
+    echo "============================================================"
+    echo "  [!] CUDA 会话建不起来 —— **GPU 不会生效**（会自动用 CPU）。"
+    echo
+    echo "  这一步是特意加的：只装 onnxruntime-gpu 时，"
+    echo "  get_available_providers() 也会列出 CUDAExecutionProvider，"
+    echo "  但真正建会话时会因缺少 CUDA/cuDNN 运行库而静默回落 CPU。"
+    echo "  上面的 PROBE 行指出了卡在哪一步。常见原因："
+    echo "    - NVIDIA 运行库没装全（重跑本脚本，让它显式安装）"
+    echo "    - 驱动版本不足（需 ≥ $CUDA13_MIN_DRIVER）"
+    echo "============================================================"
+    exit 1
   fi
-  echo "============================================================"
   exit 0
 }
 
@@ -261,9 +502,8 @@ PYEOF
 #
 #   不能写成裸的 `main "$@"`：本文件会被 enable-ocr.sh **source** 以复用
 #   install_baseline / find_python / confirm_target。source 会把整个文件当脚本
-#   执行一遍，于是**调用方只是想借用函数，却把 GPU 安装整套跑了起来** ——
-#   实测踩到过（source 后屏幕上直接开始装 CUDA）。
-#   判据用 ${BASH_SOURCE[0]} 与 $0 是否相同：直接执行时相同，被 source 时不同。
+#   执行一遍，于是**调用方只是想借用函数、却把 GPU 安装整套跑了起来**（实测踩到过）。
+#   判据：直接执行时 ${BASH_SOURCE[0]} 与 $0 相同；被 source 时不同。
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   main "$@"
 fi
