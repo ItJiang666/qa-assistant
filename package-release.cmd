@@ -114,7 +114,9 @@ echo [OK] 已生成 SHA256SUMS.txt
 
 rem ---------- 6) 打包 ----------
 set "ZIP=release\qa-assistant-!VERSION!.zip"
-powershell -NoProfile -Command "Compress-Archive -Path '!STAGE!\*' -DestinationPath '!ZIP!' -Force"
+rem  用 tools\make-release-zip.ps1 而不是 Compress-Archive：后者写出的条目名用反斜杠，
+rem  在 Linux/macOS 上会被解成平铺文件名（目录结构消失）。实测依据见该脚本头部注释。
+powershell -NoProfile -ExecutionPolicy Bypass -File "tools\make-release-zip.ps1" -StageDir "!STAGE!" -ZipPath "!ZIP!"
 if not exist "!ZIP!" (
     echo [X] 压缩失败。
     goto :fail

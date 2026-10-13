@@ -192,18 +192,21 @@ def check_dependencies() -> int:
 
 
 def _nvidia_dll_dirs() -> list[str]:
-    """找出 pip 安装的 NVIDIA 运行时 DLL 目录（`site-packages/nvidia/**/bin`）。
+    """找出 pip 安装的 NVIDIA 运行时库目录（`site-packages/nvidia/**` 下的 bin / lib）。
 
     <h2>为什么需要这个函数（实测踩出来的坑，别删）</h2>
-    `onnxruntime-gpu` 的 CUDA 版会依赖 `cublasLt64_13.dll`、`cudnn64_9.dll` 这些库，
-    它们由 `nvidia-cublas` / `nvidia-cudnn-cu13` 等包提供，落在
-    `site-packages/nvidia/<组件>/bin[/x86_64]` 下面 —— **不在系统 PATH 上**。
+    `onnxruntime-gpu` 的 CUDA 版会依赖 `cublasLt64_13.dll`、`cudnn64_9.dll`（Windows）
+    或 `libcublasLt.so.13`、`libcudnn.so.9`（Linux）这些库，它们由
+    `nvidia-cublas` / `nvidia-cudnn-cu13` 等包提供，落在 site-packages 里面 ——
+    **既不在系统 PATH（Windows）也不在默认库搜索路径（Linux）上**。
 
     于是会出现这个极具迷惑性的现象：包明明装好了、`get_available_providers()`
     也确实列出了 `CUDAExecutionProvider`，但真正建会话时报
 
         Error loading "onnxruntime_providers_cuda.dll" which depends on
         "cublasLt64_13.dll" which is missing. (Error 126)
+        Failed to load library libonnxruntime_providers_cuda.so with error:
+        libcublasLt.so.13: cannot open shared object file
 
     然后**静默回落到 CPU**（表面看只是"没变快"，不报错）。
 
@@ -211,9 +214,19 @@ def _nvidia_dll_dirs() -> list[str]:
       * `os.add_dll_directory()` —— onnxruntime 加载 EP 时不走这个搜索路径；
       * 装完之后再改 PATH —— onnxruntime 在 **import 那一刻**就注册执行器，晚了。
 
-    唯一有效的做法：在 import onnxruntime **之前**把这些目录塞进 PATH。
+    唯一有效的做法：在 import onnxruntime **之前**把这些目录塞进搜索路径。
     本模块的 `configure_gpu()` 就是这个时机，且由 `main()` 最早调用。
+
+    <h2>目录布局实测（2026-10 在 RTX 5070 / Ubuntu 22.04 / Python 3.12 上量的）</h2>
+      * Windows：`nvidia/<组件>/bin`、`nvidia/<组件>/bin/x86_64`；
+      * Linux CUDA 13 包：`nvidia/cu13/lib` —— **注意组件名是 `cu13` 而不是包名**，
+        onnxruntime 自带的搜索逻辑只认 CUDA 12 时代的 `nvidia/cublas/lib`，
+        所以这个目录必须由我们显式加进去，否则必然掉回 CPU；
+      * Linux CUDA 12 包：`nvidia/<组件>/lib`。
+    因此 Windows 认 `bin`、Linux 认 `lib`，各取所需；两种布局都扫，兼容新旧包。
     """
+    patterns = ("*/bin", "*/bin/x86_64", "*/*/bin", "*/*/bin/x86_64") if os.name == "nt" else \
+               ("*/lib", "*/*/lib")
     dirs: list[str] = []
     for entry in sys.path:
         if not entry or not os.path.isdir(entry):
@@ -221,11 +234,164 @@ def _nvidia_dll_dirs() -> list[str]:
         root = os.path.join(entry, "nvidia")
         if not os.path.isdir(root):
             continue
-        # 布局随包版本变过：有的直接 <组件>/bin，有的 <组件>/bin/x86_64
-        for pattern in ("*/bin", "*/bin/x86_64", "*/*/bin", "*/*/bin/x86_64"):
+        for pattern in patterns:
             dirs.extend(glob.glob(os.path.join(root, pattern)))
     # 去重且保持顺序
     return [d for d in dict.fromkeys(dirs) if os.path.isdir(d)]
+
+
+def _cuda_session_selftest(onnxruntime) -> tuple[bool, str]:
+    """真的建一个 CUDA 会话跑一次，确认 GPU **确实可用**；返回 (是否可用, 说明)。
+
+    <h2>为什么非要做这一层（血泪教训，别删）</h2>
+    `get_available_providers()` **不代表 CUDA 真的能用**：它列的是"这个轮子编译时
+    注册了哪些执行器"，而不是"这些执行器的动态库现在能不能被加载"。
+    实测（2026-10，Ubuntu 22.04 / Python 3.12 / onnxruntime-gpu 1.31.0）：
+
+        available providers: ['TensorrtExecutionProvider','CUDAExecutionProvider','CPUExecutionProvider']
+        InferenceSession(..., providers=['CUDAExecutionProvider'])
+        → session.get_providers() == ['CPUExecutionProvider']      # 静默掉回 CPU！
+        stderr: Failed to load libonnxruntime_providers_cuda.so:
+                libcublasLt.so.13: cannot open shared object file
+
+    也就是说：**不报错、不抛异常、只是慢 3 倍**。用户只会觉得"开了 GPU 怎么没变快"。
+    所以这里必须真建会话、真跑一次 forward，用 `session.get_providers()` 的结果说话。
+
+    <h2>模型怎么来的</h2>
+    不依赖 `onnx` 包（那只是构建工具，不该进运行依赖），直接用 protobuf 的
+    动态描述符按 onnx.proto 的字段号手搓一个 97 字节的 `Relu` 单节点模型。
+    字段号：ModelProto{ir_version=1,graph=7,opset_import=8}、GraphProto{node=1,name=2,input=11,output=12}、
+    NodeProto{input=1,output=2,name=3,op_type=4}、ValueInfoProto{name=1,type=2}、
+    TypeProto{tensor_type=1}、TypeProto.Tensor{elem_type=1,shape=2}、TensorShapeProto{dim=1}、Dim{dim_value=1}。
+    实测这套字段号能被 onnxruntime 1.31 正常加载（ir_version=7 / opset=17）。
+    protobuf 本身是 onnxruntime 的硬依赖，一定在，所以不会引入新的缺依赖风险。
+    """
+    try:
+        import uuid
+
+        from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+    except Exception as exc:
+        return False, "protobuf 动态描述符不可用：%s" % exc
+
+    try:
+        F = descriptor_pb2.FieldDescriptorProto
+        pkg = "qaocrprobe" + uuid.uuid4().hex[:8]
+        fdp = descriptor_pb2.FileDescriptorProto()
+        fdp.name, fdp.package, fdp.syntax = pkg + ".proto", pkg, "proto3"
+
+        def add(msg, name, num, typ, label=1, type_name=None):
+            f = msg.field.add()
+            f.name, f.number, f.type, f.label = name, num, typ, label
+            if type_name:
+                f.type_name = type_name
+
+        def new_msg(name):
+            m = fdp.message_type.add()
+            m.name = name
+            return m
+
+        m = new_msg("Dim"); add(m, "dim_value", 1, F.TYPE_INT64)
+        m = new_msg("TensorShape"); add(m, "dim", 1, F.TYPE_MESSAGE, 3, "." + pkg + ".Dim")
+        m = new_msg("TensorType")
+        add(m, "elem_type", 1, F.TYPE_INT32)
+        add(m, "shape", 2, F.TYPE_MESSAGE, 1, "." + pkg + ".TensorShape")
+        m = new_msg("Type"); add(m, "tensor_type", 1, F.TYPE_MESSAGE, 1, "." + pkg + ".TensorType")
+        m = new_msg("ValueInfo")
+        add(m, "name", 1, F.TYPE_STRING)
+        add(m, "type", 2, F.TYPE_MESSAGE, 1, "." + pkg + ".Type")
+        m = new_msg("Node")
+        add(m, "input", 1, F.TYPE_STRING, 3)
+        add(m, "output", 2, F.TYPE_STRING, 3)
+        add(m, "name", 3, F.TYPE_STRING)
+        add(m, "op_type", 4, F.TYPE_STRING)
+        m = new_msg("Graph")
+        add(m, "node", 1, F.TYPE_MESSAGE, 3, "." + pkg + ".Node")
+        add(m, "name", 2, F.TYPE_STRING)
+        add(m, "input", 11, F.TYPE_MESSAGE, 3, "." + pkg + ".ValueInfo")
+        add(m, "output", 12, F.TYPE_MESSAGE, 3, "." + pkg + ".ValueInfo")
+        m = new_msg("OpsetId"); add(m, "version", 2, F.TYPE_INT64)
+        m = new_msg("Model")
+        add(m, "ir_version", 1, F.TYPE_INT64)
+        add(m, "graph", 7, F.TYPE_MESSAGE, 1, "." + pkg + ".Graph")
+        add(m, "opset_import", 8, F.TYPE_MESSAGE, 3, "." + pkg + ".OpsetId")
+
+        pool = descriptor_pool.DescriptorPool()
+        pool.Add(fdp)
+        Model = message_factory.GetMessageClass(pool.FindMessageTypeByName(pkg + ".Model"))
+        model = Model()
+        model.ir_version = 7
+        model.opset_import.add().version = 17
+        model.graph.name = "qa_ocr_probe"
+        for name, container in (("x", model.graph.input), ("y", model.graph.output)):
+            vi = container.add()
+            vi.name = name
+            vi.type.tensor_type.elem_type = 1          # FLOAT
+            for dim in (1, 3, 32, 32):
+                vi.type.tensor_type.shape.dim.add().dim_value = dim
+        node = model.graph.node.add()
+        node.input.append("x")
+        node.output.append("y")
+        node.op_type = "Relu"
+        model_bytes = model.SerializeToString()
+    except Exception as exc:
+        return False, "构造自检模型失败：%s" % exc
+
+    try:
+        options = onnxruntime.SessionOptions()
+        options.log_severity_level = 3                # 只保留 error，避免正常情况刷屏
+        session = onnxruntime.InferenceSession(
+            model_bytes, sess_options=options,
+            providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+        active = list(session.get_providers())
+    except Exception as exc:
+        return False, "%s: %s" % (type(exc).__name__, str(exc).splitlines()[0][:200])
+
+    if not active or active[0] != "CUDAExecutionProvider":
+        return False, "会话实际执行器为 %s（CUDA 运行库未加载成功）" % (active or ["?"])
+    return True, "会话执行器 %s" % active[0]
+
+
+def _preload_cuda_libs(dirs: list[str]) -> tuple[int, list[str]]:
+    """Linux 专用：把 nvidia 目录下的 .so 用 `ctypes.CDLL(..., RTLD_GLOBAL)` 预加载。
+
+    <h2>为什么不能靠 LD_LIBRARY_PATH（实测结论，别改成只设环境变量）</h2>
+    在 Python 进程里执行 `os.environ["LD_LIBRARY_PATH"] = ...` **完全无效**：
+    LD_LIBRARY_PATH 是**动态链接器在进程启动时**读一次的，程序跑起来之后再改
+    环境变量，链接器不会重新读。实测（Ubuntu 22.04 / Python 3.12 / onnxruntime-gpu 1.31.0）：
+
+        在 shell 里 export LD_LIBRARY_PATH=site-packages/nvidia/*/lib  → GPU_ACTIVE
+        在 Python 里 os.environ["LD_LIBRARY_PATH"]=...                 → 仍报
+            libonnxruntime_providers_cuda.so: libcublasLt.so.13: cannot open shared object file
+
+    Windows 那边没有这个问题，因为 onnxruntime 的 EP 加载**确实**走 PATH
+    （`os.add_dll_directory()` 反倒无效），两边机制不同，别互相套用。
+
+    <h2>为什么 ctypes 预加载有效</h2>
+    用 `RTLD_GLOBAL` 把库 dlopen 进来后，其 SONAME 就登记进了进程的全局符号表，
+    之后 onnxruntime 再 `dlopen("libonnxruntime_providers_cuda.so")` 时，
+    `libcublasLt.so.13` 作为**已加载的 SONAME**被直接复用，不再去磁盘搜索 —— 于是成功。
+    实测：不设任何环境变量，仅预加载 20 个 .so，`session.get_providers()`
+    就从 `['CPUExecutionProvider']` 变成 `['CUDAExecutionProvider','CPUExecutionProvider']`。
+
+    <h2>返回</h2>
+    (成功加载的库数, 失败清单)；失败不致命 —— 脚本正常路径会先 export LD_LIBRARY_PATH，
+    那种情况下这里全部跳过；只有用户"自己 pip 装完直接跑脚本"时才依赖这条兜底。
+    """
+    import ctypes
+
+    loaded: set[str] = set()
+    failures: list[str] = []
+    for directory in dirs:
+        for path in sorted(glob.glob(os.path.join(directory, "*.so*"))):
+            base = os.path.basename(path)
+            if base in loaded:
+                continue
+            try:
+                ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+                loaded.add(base)
+            except OSError as exc:
+                failures.append("%s: %s" % (base, str(exc).splitlines()[0][:120]))
+    return len(loaded), failures
 
 
 def configure_gpu(use_cuda: bool) -> dict:
@@ -237,9 +403,18 @@ def configure_gpu(use_cuda: bool) -> dict:
     if not use_cuda:
         return {"enabled": False, "providers": [], "reason": "未开启（--use-gpu off）"}
 
+    cuda_preload: tuple[int, list[str]] = (0, [])
     dirs = _nvidia_dll_dirs()
     if dirs:
-        os.environ["PATH"] = os.pathsep.join(dirs + [os.environ.get("PATH", "")])
+        if os.name == "nt":
+            # Windows：onnxruntime 加载 EP 走 PATH（os.add_dll_directory 实测无效）
+            os.environ["PATH"] = os.pathsep.join(dirs + [os.environ.get("PATH", "")])
+        else:
+            # Linux：**设 LD_LIBRARY_PATH 没用**（实测），见 _preload_cuda_libs 的注释。
+            # 这里同时设一份，只为让本进程之后 fork 出去的子进程也带上，真正起作用的是预加载。
+            os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(
+                dirs + [os.environ.get("LD_LIBRARY_PATH", "")])
+            cuda_preload = _preload_cuda_libs(dirs)
 
     try:
         import onnxruntime
@@ -263,10 +438,24 @@ def configure_gpu(use_cuda: bool) -> dict:
     if device != "GPU":
         return {"enabled": False, "providers": providers, "reason": "onnxruntime 报告设备为 %s" % device}
 
+    # 走到这里还不能说"能用 GPU"：见 _cuda_session_selftest 的注释，
+    # get_available_providers() 在 CUDA 运行库缺失时**照样**列出 CUDAExecutionProvider。
+    ok, detail = _cuda_session_selftest(onnxruntime)
+    if not ok:
+        return {
+            "enabled": False,
+            "providers": providers,
+            "reason": "CUDA 执行器加载失败，已按 CPU 运行：%s" % detail,
+        }
+
+    if os.name == "nt":
+        note = "nvidia 运行库目录 %d 个" % len(dirs)
+    else:
+        note = "nvidia 库目录 %d 个、预加载 %d 个 .so" % (len(dirs), cuda_preload[0])
     return {
         "enabled": True,
         "providers": providers,
-        "reason": "CUDA 可用（nvidia 运行库目录 %d 个）" % len(dirs),
+        "reason": "CUDA 可用并已建会话验证（%s）" % note,
     }
 
 

@@ -459,15 +459,28 @@ install_tier() {
 #  gpu_selftest —— 真·自检：建一个 CUDA 会话，而不是只看执行器名单
 #  返回 0 表示真的能用；1 表示不能用。
 #
-#  ⚠️ 下面这段 DLL 目录搜索与 `deploy/ocr/qa_ocr.py` 的 `_nvidia_dll_dirs()`
-#     **刻意保持一致**（四种 glob 布局 + os.path.isdir 过滤）。如果探测的搜索
-#     方式和应用运行时的搜索方式不同，自检通过就不能证明应用能用。
+#  ⚠️ 下面这段库目录搜索与 `deploy/ocr/qa_ocr.py` 的 `_nvidia_dll_dirs()`
+#     **刻意保持一致**（按平台取 bin/lib + 两套 glob 布局 + os.path.isdir 过滤）。
+#     如果探测的搜索方式和应用运行时的搜索方式不同，自检通过就不能证明应用能用。
+#
+#  ⚠️⚠️ 本文件是 **Linux/macOS 版**，库目录是 `nvidia/*/lib`，不是 Windows 的 `bin`。
+#     历史教训：这一版最初照抄了 `enable-gpu.cmd` 的 Windows 逻辑，只找 `*/bin`、
+#     只改 PATH，结果在 Linux 上 **每一个档位都被判成不可用** —— 因为：
+#       1. CUDA 13 的包把库放在 `site-packages/nvidia/cu13/lib`（组件名是 cu13，
+#          不是包名 cublas/cudnn），Windows 那套 `*/bin` 一个都匹配不到；
+#       2. Linux 的动态链接器**根本不看 PATH**，它看 LD_LIBRARY_PATH，而
+#          LD_LIBRARY_PATH 只在**进程启动时**读一次，Python 里再设也没用。
+#     于是自检必然报 `libcublasLt.so.13: cannot open shared object file` 并回落 CPU，
+#     脚本就会误报"所有档位都装不上"。Windows 版不受影响，两边机制不同。
 # ---------------------------------------------------------------------------
 gpu_selftest() {
   local probe
   probe=$(mktemp "${TMPDIR:-/tmp}/qa-gpu-probe-XXXXXX.py" 2>/dev/null || echo "/tmp/qa-gpu-probe-$$.py")
   cat > "$probe" <<'PYEOF'
-import glob, os, sys
+import ctypes, glob, os, sys
+# 平台判定用 os.name，而不是 sys.platform 前缀，和 qa_ocr.py 保持一致
+pats = ('*/bin', '*/bin/x86_64', '*/*/bin', '*/*/bin/x86_64') if os.name == 'nt' \
+       else ('*/lib', '*/*/lib')
 dirs = []
 for entry in sys.path:
     if not entry or not os.path.isdir(entry):
@@ -475,12 +488,30 @@ for entry in sys.path:
     root = os.path.join(entry, 'nvidia')
     if not os.path.isdir(root):
         continue
-    for pat in ('*/bin', '*/bin/x86_64', '*/*/bin', '*/*/bin/x86_64'):
+    for pat in pats:
         dirs += glob.glob(os.path.join(root, pat))
 dirs = [d for d in dict.fromkeys(dirs) if os.path.isdir(d)]
-print('PROBE nvidia dll dirs: %d' % len(dirs))
-if dirs:
-    os.environ['PATH'] = os.pathsep.join(dirs + [os.environ.get('PATH', '')])
+print('PROBE nvidia lib dirs: %d' % len(dirs))
+preload = 0
+if os.name == 'nt':
+    # Windows：onnxruntime 加载 EP 走 PATH（os.add_dll_directory 实测无效）
+    if dirs:
+        os.environ['PATH'] = os.pathsep.join(dirs + [os.environ.get('PATH', '')])
+else:
+    # Linux：LD_LIBRARY_PATH 在这里设已经太晚（链接器启动时就读完了），
+    # 真正有效的是用 RTLD_GLOBAL 预加载，让库的 SONAME 进入进程全局符号表；
+    # 之后 onnxruntime 再 dlopen 它的 CUDA EP 时就能直接复用，不再去磁盘找。
+    if dirs:
+        os.environ['LD_LIBRARY_PATH'] = os.pathsep.join(
+            dirs + [os.environ.get('LD_LIBRARY_PATH', '')])
+    for d in dirs:
+        for so in sorted(glob.glob(os.path.join(d, '*.so*'))):
+            try:
+                ctypes.CDLL(so, mode=ctypes.RTLD_GLOBAL)
+                preload += 1
+            except OSError:
+                pass          # 单个库失败不致命，下面的会话自检会给出最终结论
+    print('PROBE preloaded .so: %d' % preload)
 try:
     import onnxruntime as ort
 except Exception as e:
@@ -489,14 +520,82 @@ provs = ort.get_available_providers()
 print('PROBE providers: %s' % '|'.join(provs))
 if 'CUDAExecutionProvider' not in provs:
     print('PROBE CUDA provider not registered'); sys.exit(1)
+
+def builtin_model():
+    """手搓一个 97 字节的 Relu 单节点模型，不依赖 rapidocr / onnx 包。
+
+    字段号取自 onnx.proto：ModelProto{ir_version=1,graph=7,opset_import=8}、
+    GraphProto{node=1,name=2,input=11,output=12}、NodeProto{input=1,output=2,name=3,op_type=4}、
+    ValueInfoProto{name=1,type=2}、TypeProto{tensor_type=1}、TypeProto.Tensor{elem_type=1,shape=2}、
+    TensorShapeProto{dim=1}、Dim{dim_value=1}。protobuf 是 onnxruntime 的硬依赖，必然在。
+    """
+    import uuid
+    from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+    F = descriptor_pb2.FieldDescriptorProto
+    pkg = 'qagpuprobe' + uuid.uuid4().hex[:8]
+    fdp = descriptor_pb2.FileDescriptorProto()
+    fdp.name, fdp.package, fdp.syntax = pkg + '.proto', pkg, 'proto3'
+    def add(m, name, num, typ, label=1, type_name=None):
+        f = m.field.add()
+        f.name, f.number, f.type, f.label = name, num, typ, label
+        if type_name:
+            f.type_name = type_name
+    def newm(name):
+        m = fdp.message_type.add(); m.name = name; return m
+    m = newm('Dim'); add(m, 'dim_value', 1, F.TYPE_INT64)
+    m = newm('TensorShape'); add(m, 'dim', 1, F.TYPE_MESSAGE, 3, '.' + pkg + '.Dim')
+    m = newm('TensorType')
+    add(m, 'elem_type', 1, F.TYPE_INT32)
+    add(m, 'shape', 2, F.TYPE_MESSAGE, 1, '.' + pkg + '.TensorShape')
+    m = newm('Type'); add(m, 'tensor_type', 1, F.TYPE_MESSAGE, 1, '.' + pkg + '.TensorType')
+    m = newm('ValueInfo')
+    add(m, 'name', 1, F.TYPE_STRING)
+    add(m, 'type', 2, F.TYPE_MESSAGE, 1, '.' + pkg + '.Type')
+    m = newm('Node')
+    add(m, 'input', 1, F.TYPE_STRING, 3); add(m, 'output', 2, F.TYPE_STRING, 3)
+    add(m, 'name', 3, F.TYPE_STRING); add(m, 'op_type', 4, F.TYPE_STRING)
+    m = newm('Graph')
+    add(m, 'node', 1, F.TYPE_MESSAGE, 3, '.' + pkg + '.Node')
+    add(m, 'name', 2, F.TYPE_STRING)
+    add(m, 'input', 11, F.TYPE_MESSAGE, 3, '.' + pkg + '.ValueInfo')
+    add(m, 'output', 12, F.TYPE_MESSAGE, 3, '.' + pkg + '.ValueInfo')
+    m = newm('OpsetId'); add(m, 'version', 2, F.TYPE_INT64)
+    m = newm('Model')
+    add(m, 'ir_version', 1, F.TYPE_INT64)
+    add(m, 'graph', 7, F.TYPE_MESSAGE, 1, '.' + pkg + '.Graph')
+    add(m, 'opset_import', 8, F.TYPE_MESSAGE, 3, '.' + pkg + '.OpsetId')
+    pool = descriptor_pool.DescriptorPool(); pool.Add(fdp)
+    try:
+        M = message_factory.GetMessageClass(pool.FindMessageTypeByName(pkg + '.Model'))
+    except AttributeError:                      # protobuf < 4.22 没有这个函数
+        M = message_factory.MessageFactory(pool).GetPrototype(
+            pool.FindMessageTypeByName(pkg + '.Model'))
+    mo = M(); mo.ir_version = 7; mo.opset_import.add().version = 17
+    mo.graph.name = 'qa_gpu_probe'
+    for name, cont in (('x', mo.graph.input), ('y', mo.graph.output)):
+        vi = cont.add(); vi.name = name; vi.type.tensor_type.elem_type = 1
+        for d in (1, 3, 32, 32):
+            vi.type.tensor_type.shape.dim.add().dim_value = d
+    nd = mo.graph.node.add(); nd.input.append('x'); nd.output.append('y'); nd.op_type = 'Relu'
+    return mo.SerializeToString()
+
+# self-test 优先用 rapidocr 自带的真实模型（更贴近实际推理），取不到再用手搓模型
+model = None
 try:
     import rapidocr
-    model = os.path.join(os.path.dirname(rapidocr.__file__),
-                         'models', 'ch_ppocr_mobile_v2.0_cls_mobile.onnx')
-except Exception as e:
-    print('PROBE import rapidocr failed: %s' % e); sys.exit(1)
-if not os.path.exists(model):
-    print('PROBE model missing: %s' % model); sys.exit(1)
+    cand = os.path.join(os.path.dirname(rapidocr.__file__),
+                        'models', 'ch_ppocr_mobile_v2.0_cls_mobile.onnx')
+    if os.path.exists(cand):
+        model = cand
+        print('PROBE model: rapidocr bundled')
+except Exception:
+    pass
+if model is None:
+    try:
+        model = builtin_model()
+        print('PROBE model: builtin %d bytes' % len(model))
+    except Exception as e:
+        print('PROBE cannot build a model: %s' % e); sys.exit(1)
 so = ort.SessionOptions()
 so.log_severity_level = 3
 try:
