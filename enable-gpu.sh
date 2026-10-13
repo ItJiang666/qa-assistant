@@ -75,12 +75,31 @@ PY=""
 PYVER=""
 PYARCH=""
 
-#  驱动下限：CUDA 13 要求 >= 580。低于它只能走 CPU（原因见上面 ②）。
+#  各档的驱动下限只用于"值不值得试"的判断，**不是**能不能用的结论 ——
+#  结论由第 5 步的"真建 CUDA 会话"给出。真正的裁决者是自检。
+#  实测各代 onnxruntime-gpu 声明的依赖（PyPI 元数据，2026-10-13 查）：
+#    1.31.0          -> nvidia-cudnn-cu13 / nvidia-cuda-nvrtc~=13.0   （CUDA 13）
+#    1.21.0 ~ 1.26.0 -> nvidia-cudnn-cu12 / nvidia-cuda-nvrtc-cu12    （CUDA 12）
+#    1.20.0 及更早    -> **完全不声明 nvidia 依赖**，必须手动列出       （CUDA 11/12 交界）
+#  ⚠️ 我上一版只抽了 1.27/1.28/1.29 就断言"没有可用的 CUDA 12 版"，是抽样太窄 ——
+#    那三个版本确实声明 cu13（自相矛盾），但 1.21~1.26 是**货真价实**的 CUDA 12。
+#    教训：判断"某条路通不通"必须把候选**列全**再下结论。
 CUDA13_MIN_DRIVER=580
+CUDA12_MIN_DRIVER=525
+CUDA11_MIN_DRIVER=450
 
-#  GPU 运行时：**显式列出，不用 extras**（原因见上面 ①）。
-#  版本约束与实测通过的那套一致：onnxruntime-gpu 1.31.0 + cudnn-cu13 9.27 + cublas 13.8 + nvrtc 13.4。
-GPU_PACKAGES="onnxruntime-gpu nvidia-cudnn-cu13~=9.0 nvidia-cublas nvidia-cuda-nvrtc~=13.0"
+#  GPU 运行时档位（从新到旧，脚本按顺序尝试，自检失败就降一档）
+#  每档：代号 | 人话名 | 驱动下限 | 显卡代次要求 | onnxruntime-gpu 约束 | 依赖包列表
+#
+#  ⚠️ 依赖包必须**显式列出**，不要用 `onnxruntime-gpu[cuda,cudnn]` 这种 extras：
+#    实测（干净机器）extras 一个 CUDA 运行库都没带进来，只装了主包 —— 这正是
+#    用户看到的"只下了 300 多 MB"。
+#  ⚠️ cu11 档用的 1.19.2 **不声明**任何 nvidia 依赖（1.20.0 之前都这样），
+#    所以那一档的包列表是唯一的来源，绝不能省。
+GPU_TIERS="cu13|CUDA 13|580|turing|onnxruntime-gpu==1.31.0|nvidia-cudnn-cu13~=9.0 nvidia-cublas nvidia-cuda-nvrtc~=13.0
+cu12|CUDA 12|525|turing|onnxruntime-gpu==1.26.0|nvidia-cudnn-cu12~=9.0 nvidia-cublas-cu12 nvidia-cuda-nvrtc-cu12~=12.0
+cu11|CUDA 11.8|450|maxwell|onnxruntime-gpu==1.19.2|nvidia-cudnn-cu11~=9.0 nvidia-cublas-cu11 nvidia-cuda-nvrtc-cu11~=11.8"
+
 NVIDIA_INDEX="https://pypi.nvidia.com"
 PYPI_INDEX="https://pypi.org/simple"
 
@@ -260,6 +279,118 @@ confirm_target() {
 }
 
 # ---------------------------------------------------------------------------
+#  arch_rank —— 把显卡名字归到一个代次序号（越大越新）。
+#  判据是**代次**而不是具体型号：CUDA 运行库按算力架构编译，同代次一视同仁。
+#  序号用于和档位的 arch_need 比较。
+# ---------------------------------------------------------------------------
+arch_rank() {
+  local n="$1"
+  case "$n" in
+    *"RTX 50"*|*"RTX 51"*|*"RTX 52"*|*"RTX 53"*|*"RTX 54"*|*"RTX 55"*|*"RTX 56"*|*"RTX 57"*|*"RTX 58"*|*"RTX 59"*) echo 90 ;; # Blackwell
+    *"RTX 40"*|*"RTX 41"*|*"RTX 42"*|*"RTX 43"*|*"RTX 44"*|*"RTX 45"*|*"RTX 46"*|*"RTX 47"*|*"RTX 48"*|*"RTX 49"*) echo 80 ;; # Ada
+    *"RTX 30"*|*"RTX 31"*|*"RTX 32"*|*"RTX 33"*|*"RTX 34"*|*"RTX 35"*|*"RTX 36"*|*"RTX 37"*|*"RTX 38"*|*"RTX 39"*) echo 70 ;; # Ampere
+    *"RTX 20"*|*"GTX 16"*|*"TITAN RTX"*|*"Quadro RTX"*|*"Quadro T"*|*"Tesla T"*) echo 60 ;;                            # Turing
+    *"GTX 10"*|*"GT 10"*|*"GTX 9"*|*"GT 9"*|*"GTX 7"*|*"GT 7"*|*"Quadro P"*|*"Quadro M"*|*"Quadro K"*|*"Tesla P"*|*"Tesla K"*|*"Tesla M"*|*"MX"*) echo 50 ;; # Maxwell/Pascal/Kepler
+    *) echo 0 ;;   # 认不出来：见 tier_eligible 里对 rank=0 的特殊处理
+  esac
+}
+
+#  档位对显卡的最低要求（与 arch_rank 的序号对应）
+arch_need_rank() {
+  case "$1" in
+    turing)  echo 60 ;;
+    maxwell) echo 50 ;;
+    *)       echo 0 ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+#  tier_eligible <代号> <驱动主版本> <显卡名>
+#  返回 0 = 这一档值得试；1 = 明确不适用（跳过，省下 1 GB 下载）。
+#  返回 2 = 驱动低于这一档的要求（可以试更旧的档）。
+# ---------------------------------------------------------------------------
+tier_eligible() {
+  local code="$1" drvmajor="$2" gpuname="$3"
+  local kind name mindrv archneed ortspec deps
+  IFS='|' read -r kind name mindrv archneed ortspec deps <<EOF
+$(tier_line "$code")
+EOF
+  local rank need
+  rank=$(arch_rank "$gpuname")
+  need=$(arch_need_rank "$archneed")
+  if [ "$rank" -eq 0 ]; then
+    #  认不出的型号：**不要**直接拒。宁可多试一次也不要把人挡在门外 ——
+    #  这正是 560.94 那次的教训（当时是靠推断拒绝，而不是靠实测）。自检会给出结论。
+    echo "[i] $name：显卡型号（$gpuname）不在已知代次表内，仍会尝试；不行由自检裁决。"
+  elif [ "$rank" -lt "$need" ]; then
+    echo "[i] $name：当前显卡（$gpuname）代次过旧，CUDA 运行库已不支持它，跳过。"
+    return 1
+  fi
+  if [ "$drvmajor" -lt "$mindrv" ]; then
+    return 2
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+#  tier_line <代号> —— 从 GPU_TIERS 里取出一行
+# ---------------------------------------------------------------------------
+tier_line() {
+  echo "$GPU_TIERS" | while IFS= read -r line; do
+    case "${line%%|*}" in
+      "$1") echo "$line"; break ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+#  tier_field <代号> <字段号 1-6>
+# ---------------------------------------------------------------------------
+tier_field() {
+  local line
+  line=$(tier_line "$1")
+  echo "$line" | cut -d'|' -f"$2"
+}
+
+# ---------------------------------------------------------------------------
+#  purge_gpu_packages —— 换档前把上一档的包彻底清掉
+#
+#  ⚠️ 必须清干净，不能"叠着装"：三代的发行包名不同、但都往**同一个**
+#     `site-packages\nvidia\**\bin` 和**同一个** `onnxruntime` 目录里放 DLL。
+#     装上 cu12 却留着 cu13 的 cublas，onnxruntime 可能加载到错的那份 ——
+#     表现仍然是"静默回落 CPU"，正是本项目反复踩的那个坑。
+#     `onnxruntime-gpu` 与 `onnxruntime` 也同名同目录，两个都要卸。
+# ---------------------------------------------------------------------------
+purge_gpu_packages() {
+  echo "      清理上一档的 GPU 包（避免两代 CUDA 的 DLL 混在一起）..."
+  #  注意 nvidia-* 是**故意不加引号**的：要让 pip 自己去展开这个通配符，
+  #  而不是由 shell 展开文件。这些名字在正常目录里匹配不到文件，所以走的是
+  #  字面量传参；万一目录里真有同名文件，加引号反而更危险（会把文件名喂给 pip）。
+  #  不能只卸已知名字：换档时残留的上一代包会让 onnxruntime 加载到错的 DLL，
+  #  表现又是"静默回落 CPU"。
+  "$PY" -m pip uninstall -y -q \
+    onnxruntime onnxruntime-gpu nvidia-* \
+    >/dev/null 2>&1
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+#  install_tier <代号> —— 安装某一档，返回 pip 的结果
+# ---------------------------------------------------------------------------
+install_tier() {
+  local code="$1"
+  local name ortspec deps
+  name=$(tier_field "$code" 2)
+  ortspec=$(tier_field "$code" 5)
+  deps=$(tier_field "$code" 6)
+  echo "      档位：$name"
+  echo "      包  ：$ortspec  +  $deps"
+  # shellcheck disable=SC2086
+  pip_retry "安装 $name 运行库" "$PY" -m pip install --upgrade \
+    --disable-pip-version-check $(pip_args) "$ortspec" $deps
+}
+
+# ---------------------------------------------------------------------------
 #  gpu_selftest —— 真·自检：建一个 CUDA 会话，而不是只看执行器名单
 #  返回 0 表示真的能用；1 表示不能用。
 #
@@ -389,7 +520,9 @@ main() {
   echo "[2/6] 显卡：$GPUNAME"
   echo "      驱动：$DRV"
 
-  # ---- 3. 驱动是否够新（不够就明确走 CPU，不做"CUDA 12 兜底"）--------------
+  # ---- 3. 算出驱动主版本，并列出可尝试的档位 -------------------------------
+  #  这里**不再**用驱动版本把人挡在门外（那正是 560.94 那次的错）：
+  #  驱动版本只决定"哪些档位值得试"，能否生效交给第 5 步的真自检裁决。
   local DRVMAJOR
   DRVMAJOR=$(echo "$DRV" | cut -d. -f1)
   case "$DRVMAJOR" in ''|*[!0-9]*) DRVMAJOR=0 ;; esac
@@ -399,44 +532,45 @@ main() {
     install_baseline || exit 1
     exit 0
   fi
-
-  if [ "$DRVMAJOR" -lt "$CUDA13_MIN_DRIVER" ]; then
-    echo "[3/6] 驱动版本不足：$DRV < $CUDA13_MIN_DRIVER"
-    echo
-    echo "[i] onnxruntime-gpu 当前需要的 CUDA 13 运行库要求驱动 ≥ $CUDA13_MIN_DRIVER。"
-    echo "    本脚本**不再提供旧版 CUDA 兜底**：实测旧索引里那几个版本"
-    echo "    （1.27/1.28/1.29）元数据声明的仍是 cu13 依赖，按那条路配不通。"
-    echo "    请**升级 NVIDIA 驱动**后重跑本脚本（升级驱动是免费的，也不需要动显卡）。"
-    echo "    在此之前，先装上 CPU 版 OCR，功能照常可用（38 页约 47 秒）。"
-    install_baseline || exit 1
-    exit 0
-  fi
-
-  # 很老的卡：即使驱动够新，CUDA 运行库也已不支持这些代次
-  case "$GPUNAME" in
-    *"GTX 10"*|*"GTX 9"*|*"GTX 7"*|*"GT 10"*|*"GT 9"*|*"GT 7"*|*"Quadro K"*|*"Quadro P"*|*"Quadro M"*|*"Tesla K"*|*"Tesla P"*)
-      echo
-      echo "[i] 这个代次的显卡（GTX 10 系及更早）不被 CUDA 运行库支持，"
-      echo "    装上也起不来，因此跳过 GPU 运行库，改为安装 CPU 版 OCR 基线。"
-      install_baseline || exit 1
-      exit 0
-      ;;
-  esac
-  echo "[3/6] CUDA：13（驱动 $DRV ≥ $CUDA13_MIN_DRIVER）"
+  echo "[3/6] 驱动主版本：$DRVMAJOR（将据此挑选可尝试的档位）"
 
   # ---- 4. OCR 基线 ---------------------------------------------------------
   echo "[4/6] 安装 OCR 基线（rapidocr、pymupdf）..."
   install_baseline || exit 1
   echo
 
-  # ---- 5. GPU 运行库（显式列出）--------------------------------------------
-  echo "[5/6] 安装 GPU 运行库（约 1.07 GB 下载）..."
-  echo "      onnxruntime-gpu  +  nvidia-cudnn-cu13 9.x / nvidia-cublas / nvidia-cuda-nvrtc 13.x"
-  if [ -n "$SRC_INDEX" ]; then
-    echo "      索引源：$SRC_INDEX（自定义，另挂 pypi.org 作补充）"
-  else
-    echo "      索引源：$NVIDIA_INDEX"
+  # ---- 5+6. 按档位尝试 GPU 运行库，装完立刻真自检，失败降档 ----------------
+  #  ⚠️ 这是本脚本的核心设计：**驱动下限不靠推断，靠自检裁决**。
+  #     驱动版本只能告诉我们"某档值不值得试"，能不能用由"建 CUDA 会话"回答。
+  #     这样做的好处：不管什么显卡、什么驱动，只要能跑就一定能装上；
+  #     宁可靠实测多试一次，也不要靠猜测把人挡在门外（那正是 560.94 那次的教训）。
+  local TIER_OK="" TIER_LAST_FAIL="" TIER_TRIED=0
+  local CANDIDATES=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    code=$(echo "$line" | cut -d'|' -f1)
+    tier_eligible "$code" "$DRVMAJOR" "$GPUNAME"
+    rc=$?
+    case $rc in
+      0) CANDIDATES="$CANDIDATES $code" ;;
+      1) : ;;                      # 代次不支持，已提示
+      2) : ;;                      # 驱动不够，静默跳过（下面统一汇总）
+    esac
+  done <<EOF
+$GPU_TIERS
+EOF
+
+  if [ -z "$CANDIDATES" ]; then
+    echo
+    echo "[!] 没有一档 GPU 运行库适用于当前组合（驱动 $DRV、显卡 $GPUNAME）。"
+    echo "    驱动太旧：CUDA 11.8 也需要驱动 >= $CUDA11_MIN_DRIVER。"
+    echo "    请升级 NVIDIA 驱动后重跑；在此之前 CPU 版 OCR 已装好，功能照常可用。"
+    exit 0
   fi
+
+  echo "[5/6] 将按顺序尝试这些档位：$CANDIDATES"
+  echo "      说明：驱动下限只用来决定'值不值得试'，能不能用由**真建会话**裁决。"
+  echo "      索引源：${SRC_INDEX:-$NVIDIA_INDEX}"
   echo "      网络  ：$PIP_NET_OPTS$(pip_supports_resume && echo ' --resume-retries 5')"
   echo
   if [ -n "$PRE" ]; then
@@ -456,46 +590,62 @@ main() {
     exit 1
   fi
 
-  # shellcheck disable=SC2086
-  if ! pip_retry "安装 GPU 运行库" "$PY" -m pip install --upgrade \
-      --disable-pip-version-check $(pip_args) $GPU_PACKAGES; then
+  for code in $CANDIDATES; do
+    TIER_TRIED=$((TIER_TRIED + 1))
     echo
-    echo "[X] 安装失败。常见原因：网络受限、需要代理、或源不可达。"
-    echo "    重试也不会从头下载：已下完的包都在 pip 缓存里。"
-    echo "    建议按顺序试："
-    echo "      1) 直接重跑本脚本（镜像抖动多半第二次就好）"
-    echo "      2) 换镜像源：bash enable-gpu.sh --source https://pypi.tuna.tsinghua.edu.cn/simple"
-    echo "      3) 挂代理  ：bash enable-gpu.sh --proxy http://127.0.0.1:7890"
-    echo "    什么都没被弄坏：应用会自动回落到 CPU，照常可用。"
-    exit 1
-  fi
-  echo
+    echo "------------------------------------------------------------"
+    echo "[$TIER_TRIED] 尝试 $(tier_field "$code" 2)"
+    echo "------------------------------------------------------------"
+    if [ "$TIER_TRIED" -gt 1 ]; then
+      purge_gpu_packages
+    fi
+    if ! install_tier "$code"; then
+      echo
+      echo "[!] $(tier_field "$code" 2) 的包没装上（网络或源的问题）。"
+      echo "    重试也不会从头下载：已下完的包都在 pip 缓存里。"
+      echo "    若换过源可再试：--source / --proxy，见 --help。"
+      TIER_LAST_FAIL="$code"
+      continue
+    fi
+    echo
+    echo "      自检：用 rapidocr 自带的模型建一个 CUDA 会话（约 3 秒）..."
+    if gpu_selftest; then
+      TIER_OK="$code"
+      break
+    fi
+    echo
+    echo "[!] $(tier_field "$code" 2) 的会话建不起来 —— 这一档在按本机驱动/显卡不可用。"
+    TIER_LAST_FAIL="$code"
+  done
 
-  # ---- 6. 真·自检 ----------------------------------------------------------
-  echo "[6/6] 自检：用 rapidocr 自带的模型建一个 CUDA 会话（约 3 秒）..."
-  if gpu_selftest; then
+  # ---- 结论 ----------------------------------------------------------------
+  if [ -n "$TIER_OK" ]; then
     echo
     echo "============================================================"
-    echo "  [OK] GPU 加速已启用，且**已实测建会话成功**。"
+    echo "  [OK] GPU 加速已启用 —— 档位：$(tier_field "$TIER_OK" 2)"
+    echo "       并且**已实测建会话成功**，不是只看执行器名单。"
     echo
     echo "  重启应用后随便识别一份扫描件，到日志里搜「OCR 使用 GPU 加速」确认。"
     echo "  预期效果（38 页扫描件实测）：约 47 秒 → 约 17 秒。"
+    echo "  随时可用 --verify 复查当前是否生效。"
     echo "============================================================"
-  else
-    echo
-    echo "============================================================"
-    echo "  [!] CUDA 会话建不起来 —— **GPU 不会生效**（会自动用 CPU）。"
-    echo
-    echo "  这一步是特意加的：只装 onnxruntime-gpu 时，"
-    echo "  get_available_providers() 也会列出 CUDAExecutionProvider，"
-    echo "  但真正建会话时会因缺少 CUDA/cuDNN 运行库而静默回落 CPU。"
-    echo "  上面的 PROBE 行指出了卡在哪一步。常见原因："
-    echo "    - NVIDIA 运行库没装全（重跑本脚本，让它显式安装）"
-    echo "    - 驱动版本不足（需 ≥ $CUDA13_MIN_DRIVER）"
-    echo "============================================================"
-    exit 1
+    exit 0
   fi
-  exit 0
+
+  echo
+  echo "============================================================"
+  echo "  [!] 试过的档位都建不起 CUDA 会话 —— GPU 不会生效（会自动用 CPU）。"
+  echo
+  echo "  这一步是特意加的：只装 onnxruntime-gpu 时，"
+  echo "  get_available_providers() 也会列出 CUDAExecutionProvider，"
+  echo "  但真正建会话时会因缺少 CUDA/cuDNN 运行库而静默回落 CPU。"
+  echo "  上面的 PROBE 行指出了卡在哪一步。常见原因："
+  echo "    - 驱动太旧（CUDA 11.8 也要求 >= $CUDA11_MIN_DRIVER）→ 升级驱动"
+  echo "    - 显卡代次过旧，CUDA 运行库已不支持 → 只能用 CPU"
+  echo "    - 网络把包下坏了 → 重跑本脚本（已下的会复用）"
+  echo "  当前环境仍可正常跑 OCR，只是走 CPU。"
+  echo "============================================================"
+  exit 1
 }
 
 # ⚠️ 只有"直接执行"时才跑 main。

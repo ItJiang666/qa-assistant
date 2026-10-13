@@ -91,14 +91,45 @@ set "PYVER="
 set "PYM="
 set "PYN="
 set "PROBE_RC="
+rem  Per-tier driver floors. They only decide whether a tier is WORTH TRYING --
+rem  whether it actually works is decided by the real CUDA session self-test.
+rem  Measured from PyPI metadata (2026-10-13):
+rem    1.31.0          -> nvidia-cudnn-cu13 / nvidia-cuda-nvrtc~=13.0  (CUDA 13)
+rem    1.21.0 ~ 1.26.0 -> nvidia-cudnn-cu12 / nvidia-cuda-nvrtc-cu12   (CUDA 12)
+rem    1.20.0 and older -> declares NO nvidia deps at all             (install manually)
+rem
+rem  NOTE on a mistake worth not repeating: an earlier version sampled only
+rem  1.27 / 1.28 / 1.29, found they declare cu13, and concluded "no usable CUDA 12
+rem  build exists". Wrong -- 1.21~1.26 ARE genuine CUDA 12. List all candidates
+rem  before declaring a path dead.
 set "CUDA13_MIN_DRIVER=580"
+set "CUDA12_MIN_DRIVER=525"
+set "CUDA11_MIN_DRIVER=450"
+
+rem  GPU runtime tiers, newest first. The script tries them in order and steps
+rem  down whenever the real self-test cannot build a CUDA session.
+rem  Columns: code | label | driver floor | arch need | onnxruntime spec | deps
+rem
+rem  DO NOT go back to the `onnxruntime-gpu[cudnn]` extra: measured on a clean
+rem  machine it pulled in NO CUDA runtime at all (only the 160 MB main wheel),
+rem  which is why the user saw only ~300 MB downloaded with no GPU effect.
+rem  Deps must always be listed explicitly.
+rem  NOTE: built up line by line with `>>` appends rather than one multi-line
+rem  `set`. cmd cannot span a `set` across physical lines, and `^` line
+rem  continuation does NOT work reliably here -- measured: the cu12 / cu11 rows
+rem  still ended up executed as commands ("'cu12' is not recognized"). Appending
+rem  to a temp file is the form that works, and it is also exactly what the tier
+rem  lookup reads back, so the table exists in only one place.
+set "TIER_FILE=%TEMP%\qa-gpu-tiers.txt"
+> "%TIER_FILE%"  echo cu13^|CUDA 13^|580^|turing^|onnxruntime-gpu==1.31.0^|nvidia-cudnn-cu13~=9.0 nvidia-cublas nvidia-cuda-nvrtc~=13.0
+>>"%TIER_FILE%" echo cu12^|CUDA 12^|525^|turing^|onnxruntime-gpu==1.26.0^|nvidia-cudnn-cu12~=9.0 nvidia-cublas-cu12 nvidia-cuda-nvrtc-cu12~=12.0
+>>"%TIER_FILE%" echo cu11^|CUDA 11.8^|450^|maxwell^|onnxruntime-gpu==1.19.2^|nvidia-cudnn-cu11~=9.0 nvidia-cublas-cu11 nvidia-cuda-nvrtc-cu11~=11.8
 set "NVIDIA_INDEX=https://pypi.nvidia.com"
 set "PYPI_INDEX=https://pypi.org/simple"
 
-rem  GPU runtime packages -- explicit list, NO extras (caveat 1).
-rem  Versions match the combination verified working on the dev machine:
-rem  onnxruntime-gpu 1.31.0 + nvidia-cudnn-cu13 9.27 + nvidia-cublas 13.8 + nvrtc 13.4
-set "GPU_PACKAGES=onnxruntime-gpu nvidia-cudnn-cu13~=9.0 nvidia-cublas nvidia-cuda-nvrtc~=13.0"
+rem  (The GPU package list now lives in the TIER_FILE table written above --
+rem   one list per tier, because each tier needs a different CUDA generation.)
+set "GPUN_FILE=%TEMP%\qa-gpu-name.txt"
 
 rem  Custom source / proxy / retries. NOTE: :parse_args CLEARS SRC_INDEX and
 rem  PROXY, so these environment fallbacks must be (re)applied AFTER parsing --
@@ -229,7 +260,11 @@ if not defined DRV (
 echo [2/6] GPU    : !GPUNAME!
 echo       driver : !DRV!
 
-rem ---- 3. driver new enough? (no CUDA-12 fallback -- caveat 2) --------------
+rem ---- 3. work out which tiers are worth trying ------------------------------
+rem  The driver version NO LONGER decides "can this machine use the GPU". That
+rem  judgement is what locked an RTX 4060 + driver 560.94 out of a working
+rem  install. Driver version only filters which tiers are worth a download; the
+rem  real self-test in step 6 decides whether a tier actually works.
 set "DRVMAJOR="
 for /f "tokens=1 delims=." %%m in ("!DRV!") do set "DRVMAJOR=%%m"
 set /a "DRVNUM=DRVMAJOR" 2>nul
@@ -242,49 +277,26 @@ if "!TARGET!"=="cpu" (
   if errorlevel 1 goto :fail
   goto :done_cpu
 )
+echo [3/6] driver major : !DRVNUM!  ^(used to pick candidate tiers^)
 
-if !DRVNUM! LSS %CUDA13_MIN_DRIVER% (
-  echo [3/6] Driver too old for CUDA 13 : !DRV! ^< %CUDA13_MIN_DRIVER%
+set "CANDIDATES="
+for /f "usebackq tokens=1 delims=|" %%c in (`findstr /b /c:"cu13" /c:"cu12" /c:"cu11" "!TIER_FILE!"`) do (
+  call :tier_eligible "%%c"
+  if !errorlevel! EQU 0 set "CANDIDATES=!CANDIDATES! %%c"
+)
+if not defined CANDIDATES (
   echo.
-  echo [i] The CUDA 13 runtime that onnxruntime-gpu needs requires driver ^>= %CUDA13_MIN_DRIVER%.
-  echo     This script DELIBERATELY ships no older-CUDA fallback: measured, the
-  echo     versions on the old CUDA 12 feed ^(1.27 / 1.28 / 1.29^) declare cu13
-  echo     dependencies in their metadata, so that path cannot be made to work.
-  echo     Please UPDATE YOUR NVIDIA DRIVER and run this script again -- updating
-  echo     the driver is free and does not require changing the GPU.
-  echo     Until then, CPU OCR is installed and works ^(38 pages in ~47 s^).
+  echo [X] No GPU runtime tier applies to this machine.
+  echo     Driver !DRV! is too old even for CUDA 11.8 ^(needs ^>= %CUDA11_MIN_DRIVER%^),
+  echo     or the GPU generation is older than Maxwell.
+  echo     Please UPDATE YOUR NVIDIA DRIVER and run this script again -- that is
+  echo     free and does not require changing the GPU.
+  echo     CPU OCR is installed meanwhile and works ^(38 pages in ~47 s^).
   call :install_baseline
   if errorlevel 1 goto :fail
   goto :done_cpu
 )
-
-rem  Very old cards: the CUDA runtimes dropped Maxwell/Pascal, so even with a
-rem  new driver the provider cannot start. Say so instead of letting the user
-rem  download ~1 GB for nothing.
-rem
-rem  NOTE: written WITHOUT a pipe, and the exit code is captured immediately.
-rem  `echo !GPUNAME! | findstr ... >nul` followed by `if not errorlevel 1` looks
-rem  natural but is fragile twice over: GPUNAME can be empty, and this project
-rem  has measured a pipe-related cmd failure that killed a script mid-run (the
-rem  --resume-retries probe in :pip_args). findstr can read a file directly, and
-rem  `set` after it would clobber errorlevel, hence OLDGPU_RC.
-echo !GPUNAME! > "%TEMP%\qa-gpu-name.txt"
-findstr /i /c:"GTX 10" /c:"GTX 9" /c:"GTX 7" /c:"GT 10" /c:"GT 9" /c:"GT 7" /c:"Quadro K" /c:"Quadro P" /c:"Quadro M" /c:"Tesla K" /c:"Tesla P" "%TEMP%\qa-gpu-name.txt" >nul
-set "OLDGPU_RC=!errorlevel!"
-del "%TEMP%\qa-gpu-name.txt" >nul 2>nul
-if "!OLDGPU_RC!"=="0" (
-  echo.
-  echo [i] This GPU generation ^(GTX 10-series / older^) is no longer supported by
-  echo     the CUDA runtimes that onnxruntime-gpu needs. The install would
-  echo     succeed but CUDAExecutionProvider would fail to start, so we skip it
-  echo     rather than waste a ~1 GB download.
-  echo     Installing the CPU OCR baseline instead -- it already got a ~6.6x
-  echo     speedup in v1.28 and needs no extra downloads.
-  call :install_baseline
-  if errorlevel 1 goto :fail
-  goto :done_cpu
-)
-echo [3/6] CUDA   : 13  ^(driver !DRV! ^>= %CUDA13_MIN_DRIVER%^)
+echo       tiers to try  :!CANDIDATES!
 
 rem ---- 4. OCR baseline, ALWAYS install --------------------------------------
 rem  onnxruntime is only the INFERENCE BACKEND. What actually reads text is
@@ -299,9 +311,10 @@ call :install_baseline
 if errorlevel 1 goto :fail
 echo.
 
-rem ---- 5. GPU runtime, explicit package list (caveat 1) ---------------------
-echo [5/6] About to install the GPU runtime:
-echo       %GPU_PACKAGES%
+rem ---- 5+6. try tiers in order, self-test each, step down on failure ---------
+echo [5/6] Will try these tiers in order:!CANDIDATES!
+echo       A tier is accepted only if a real CUDA session can be built. The
+echo       driver floor only decides which tiers are worth the download.
 if defined SRC_INDEX (
   echo       from index: !SRC_INDEX!  ^(custom; pypi.org kept as a supplement^)
 ) else (
@@ -309,13 +322,14 @@ if defined SRC_INDEX (
 )
 call :pip_args
 echo       network   : %PIP_ARGS%
+for /f "tokens=1" %%c in ("!CANDIDATES!") do call :show_tier "%%c"
 echo.
 if defined PRE (
   echo [i] --check given: NOT installing. Re-run without --check to proceed.
   goto :done_plan
 )
 
-echo       Downloading ~1.07 GB ^(needs a working internet connection^).
+echo       Downloading up to ~1.5 GB ^(needs a working internet connection^).
 echo       This may take a few minutes. Do not close this window.
 echo.
 
@@ -334,20 +348,58 @@ if errorlevel 1 (
   goto :fail
 )
 
-call :pip_retry
-if errorlevel 1 (
+rem  Build the self-test file ONCE, outside the loop.
+call :write_probe
+
+set "TIER_OK="
+set "TIER_TRIED=0"
+for %%c in (!CANDIDATES!) do (
+  set /a "TIER_TRIED+=1"
   echo.
-  echo [X] Install failed. Common causes: network blocked, proxy required, or
-  echo     the source is unreachable.
-  echo     A retry does NOT re-download everything: finished wheels stay in
-  echo     pip's cache. Try in this order:
-  echo       1^) simply re-run this script ^(mirror hiccups usually clear up^)
-  echo       2^) a mirror: enable-gpu.cmd --source https://pypi.tuna.tsinghua.edu.cn/simple
-  echo       3^) a proxy : enable-gpu.cmd --proxy http://127.0.0.1:7890
-  echo     Nothing was broken: the application falls back to CPU automatically.
-  goto :fail
+  echo ------------------------------------------------------------
+  echo [!TIER_TRIED!] trying tier: %%c
+  echo ------------------------------------------------------------
+  rem  Switching tiers MUST remove the previous generation first. The packages
+  rem  differ by name but all drop DLLs into the SAME site-packages\nvidia\**\bin
+  rem  and the SAME onnxruntime directory; leaving cu13 libraries next to a cu12
+  rem  build makes onnxruntime load the wrong one -- which shows up, again, as a
+  rem  SILENT fallback to CPU instead of an error.
+  if !TIER_TRIED! GTR 1 call :purge_gpu_tiers
+  call :show_tier "%%c"
+  call :pip_retry_tier "%%c"
+  if errorlevel 1 (
+    echo.
+    echo [!] Tier %%c could not be installed ^(network or source^).
+    echo     A retry does NOT re-download everything: finished wheels stay in
+    echo     pip's cache. Mirrors: see --source / --proxy in --help.
+  ) else (
+    call :run_probe
+    if "!PROBE_RC!"=="0" set "TIER_OK=%%c"
+    if not defined TIER_OK (
+      echo.
+      echo [!] Tier %%c cannot build a CUDA session here. Stepping down.
+    )
+  )
+  if defined TIER_OK goto :tier_done
 )
+:tier_done
+
+if defined TIER_OK goto :selftest
 echo.
+echo ============================================================
+echo   [!] Every candidate tier failed to build a CUDA session.
+echo
+echo   This check exists on purpose: with only onnxruntime-gpu installed,
+echo   get_available_providers^(^) STILL lists CUDAExecutionProvider, but
+echo   creating a session cannot load the CUDA DLLs and falls back to CPU
+echo   without any error. The PROBE lines above show where it stopped.
+echo   Common causes:
+echo     - driver too old even for CUDA 11.8 ^(needs ^>= %CUDA11_MIN_DRIVER%^)
+echo     - GPU generation older than Maxwell, which CUDA dropped
+echo     - a broken download ^(just re-run; finished wheels are reused^)
+echo   OCR still works on CPU meanwhile.
+echo ============================================================
+goto :fail
 
 rem ---- 6. REAL self-test: build a CUDA session (caveat 3) -------------------
 rem  Also the landing point for --verify, hence the conditional label text.
@@ -355,7 +407,7 @@ rem  Also the landing point for --verify, hence the conditional label text.
 if defined VERIFY_ONLY (
   echo [verify] Self-test: building a CUDA session from a bundled model ^(~3 s^)...
 ) else (
-  echo [6/6] Self-test: building a CUDA session from a bundled model ^(~3 s^)...
+  echo [6/6] Self-test ^(tier !TIER_OK!^): building a CUDA session ^(~3 s^)...
 )
 rem  Order matters: build the probe file first, THEN run it and capture the exit
 rem  code straight away. Do not put anything between the run and the capture --
@@ -405,8 +457,8 @@ goto :end
 
 :done_plan
 echo.
-echo [i] Dry run finished. The pip command that WOULD run is:
-echo       %PY% -m pip install %PIP_ARGS% %GPU_PACKAGES%
+echo [i] Dry run finished. The pip commands that WOULD run are printed above,
+echo     one per candidate tier, each with its own CUDA generation.
 goto :end
 
 :fail
@@ -415,11 +467,141 @@ exit /b 1
 
 :end
 echo.
+rem  Clean up the temp file the tier table was written to.
+del "%TIER_FILE%" >nul 2>nul
 rem  Do not block automation: pause only when a human is watching.
 if defined PRE goto :eof
 if defined VERIFY_ONLY goto :eof
 echo Press any key to close this window...
 pause >nul
+exit /b 0
+
+rem ---------------------------------------------------------------------------
+rem  :arch_rank <gpu name>   -> sets ARCH_RANK
+rem  Coarse generation rank, newest highest. The CUDA runtimes are compiled per
+rem  compute capability, so what matters is the generation, not the exact model.
+rem  Unknown names get rank 0, and :tier_eligible deliberately still tries them:
+rem  refusing on an un-recognised name is exactly how the RTX 4060 + driver
+rem  560.94 case got locked out. Let the self-test decide instead.
+rem ---------------------------------------------------------------------------
+:arch_rank
+set "ARCH_RANK=0"
+echo %~1> "%GPUN_FILE%"
+findstr /i /c:"RTX 50" /c:"RTX 51" /c:"RTX 52" /c:"RTX 53" /c:"RTX 54" /c:"RTX 55" /c:"RTX 56" /c:"RTX 57" /c:"RTX 58" /c:"RTX 59" "%GPUN_FILE%" >nul && set "ARCH_RANK=90"
+if "!ARCH_RANK!"=="0" findstr /i /c:"RTX 40" /c:"RTX 41" /c:"RTX 42" /c:"RTX 43" /c:"RTX 44" /c:"RTX 45" /c:"RTX 46" /c:"RTX 47" /c:"RTX 48" /c:"RTX 49" "%GPUN_FILE%" >nul && set "ARCH_RANK=80"
+if "!ARCH_RANK!"=="0" findstr /i /c:"RTX 30" /c:"RTX 31" /c:"RTX 32" /c:"RTX 33" /c:"RTX 34" /c:"RTX 35" /c:"RTX 36" /c:"RTX 37" /c:"RTX 38" /c:"RTX 39" "%GPUN_FILE%" >nul && set "ARCH_RANK=70"
+if "!ARCH_RANK!"=="0" findstr /i /c:"RTX 20" /c:"GTX 16" /c:"TITAN RTX" /c:"Quadro RTX" /c:"Quadro T" /c:"Tesla T" "%GPUN_FILE%" >nul && set "ARCH_RANK=60"
+if "!ARCH_RANK!"=="0" findstr /i /c:"GTX 10" /c:"GT 10" /c:"GTX 9" /c:"GT 9" /c:"GTX 7" /c:"GT 7" /c:"Quadro P" /c:"Quadro M" /c:"Quadro K" /c:"Tesla P" /c:"Tesla K" /c:"Tesla M" /c:"MX" "%GPUN_FILE%" >nul && set "ARCH_RANK=50"
+exit /b 0
+
+rem ---------------------------------------------------------------------------
+rem  :tier_line <code>   -> sets TIER_LINE to the whole matching row
+rem  The table lives in a temp FILE because cmd cannot iterate a multi-line
+rem  variable with `for /f` -- reading a file is the form that works.
+rem ---------------------------------------------------------------------------
+:tier_line
+set "TIER_LINE="
+for /f "usebackq delims=" %%L in ("%TIER_FILE%") do (
+  if not defined TIER_LINE (
+    for /f "tokens=1 delims=|" %%k in ("%%L") do (
+      if /i "%%k"=="%~1" set "TIER_LINE=%%L"
+    )
+  )
+)
+if not defined TIER_LINE exit /b 1
+exit /b 0
+
+rem ---------------------------------------------------------------------------
+rem  :tier_field <code> <1-6>   -> sets TIER_FIELD
+rem ---------------------------------------------------------------------------
+:tier_field
+call :tier_line "%~1"
+if errorlevel 1 exit /b 1
+for /f "tokens=%~2 delims=|" %%v in ("!TIER_LINE!") do set "TIER_FIELD=%%v"
+exit /b 0
+
+rem ---------------------------------------------------------------------------
+rem  :tier_eligible <code>
+rem  0 = worth trying, 1 = generation unsupported, 2 = driver too old.
+rem  Driver floors are deliberatively permissive: an over-eager "no" is the bug
+rem  this version fixes, while an over-eager "yes" only costs a download that the
+rem  self-test then rejects.
+rem ---------------------------------------------------------------------------
+:tier_eligible
+call :tier_field "%~1" 3
+set /a "T_MINDRV=TIER_FIELD" 2>nul
+call :tier_field "%~1" 4
+set "T_ARCHNEED=!TIER_FIELD!"
+call :tier_field "%~1" 2
+set "T_LABEL=!TIER_FIELD!"
+call :arch_rank "!GPUNAME!"
+set "T_NEED=60"
+if /i "!T_ARCHNEED!"=="maxwell" set "T_NEED=50"
+if "!ARCH_RANK!"=="0" (
+  rem  Unknown model: try it. The self-test is the judge, not a name table.
+  echo [i] !T_LABEL!: GPU "!GPUNAME!" is not in the known-generation table; trying anyway.
+) else (
+  if !ARCH_RANK! LSS !T_NEED! (
+    echo [i] !T_LABEL!: GPU generation too old for this tier; skipping.
+    exit /b 1
+  )
+)
+if !DRVNUM! LSS !T_MINDRV! exit /b 2
+exit /b 0
+
+rem ---------------------------------------------------------------------------
+rem  :show_tier <code>   print what this tier will install
+rem ---------------------------------------------------------------------------
+:show_tier
+call :tier_field "%~1" 2
+set "T_LABEL=!TIER_FIELD!"
+call :tier_field "%~1" 5
+set "T_ORT=!TIER_FIELD!"
+call :tier_field "%~1" 6
+set "T_DEPS=!TIER_FIELD!"
+echo       tier      : !T_LABEL!  ^(%~1^)
+echo       packages  : !T_ORT!  +  !T_DEPS!
+exit /b 0
+
+rem ---------------------------------------------------------------------------
+rem  :purge_gpu_tiers
+rem  Remove every GPU runtime before switching tiers. `nvidia-*` is passed to pip
+rem  as a glob ON PURPOSE (unquoted) so pip expands it; these names match no real
+rem  files in a normal directory, so the shell passes them through literally.
+rem  Both onnxruntime distributions are removed because they share one directory.
+rem ---------------------------------------------------------------------------
+:purge_gpu_tiers
+echo       removing the previous CUDA generation ^(avoid mixing DLLs^)...
+%PY% -m pip uninstall -y -q onnxruntime onnxruntime-gpu nvidia-* >nul 2>nul
+exit /b 0
+
+rem ---------------------------------------------------------------------------
+rem  :pip_retry_tier <code>   install one tier, with the outer retry loop
+rem
+rem  *** MEASURED TRAP *** the packages must be passed UNQUOTED. Writing
+rem  `call :pip_retry "!T_ORT! !T_DEPS!"` makes %* a SINGLE quoted string, so pip
+rem  receives one bogus requirement and fails with
+rem      Invalid requirement: 'onnxruntime-gpu==1.19.2 nvidia-cudnn-cu11~=9.0 ...'
+rem  That failure looked exactly like "this tier does not work", which is the
+rem  dangerous part: the fallback loop then blamed the tier instead of the bug.
+rem ---------------------------------------------------------------------------
+:pip_retry_tier
+call :tier_field "%~1" 5
+set "T_ORT=!TIER_FIELD!"
+call :tier_field "%~1" 6
+set "T_DEPS=!TIER_FIELD!"
+call :pip_retry !T_ORT! !T_DEPS!
+exit /b %errorlevel%
+
+rem ---------------------------------------------------------------------------
+rem  :run_probe   run the self-test file and set PROBE_RC
+rem  Nothing may sit between the run and the capture: `set` and `del` overwrite
+rem  errorlevel, and a mis-captured exit code once made a broken check report
+rem  success in this project.
+rem ---------------------------------------------------------------------------
+:run_probe
+%PY% "%PROBE%"
+set "PROBE_RC=!errorlevel!"
 exit /b 0
 
 rem ---------------------------------------------------------------------------
@@ -579,24 +761,26 @@ echo       reachable
 exit /b 0
 
 rem ---------------------------------------------------------------------------
-rem  :pip_retry
-rem  Run the GPU install, retrying on failure with 5 / 10 / 20 second waits.
+rem  :pip_retry <packages>
+rem  Run one pip install, retrying on failure with 5 / 10 / 20 second waits.
 rem
 rem  Why an outer loop when pip already has --retries: pip's --retries governs
-rem  a SINGLE request, while one 1 GB install makes many. When the whole run
-rem  fails part-way (connection killed, timeout, mirror hiccup) pip just exits
-rem  and the user has to start over by hand. Wheels already downloaded stay in
-rem  pip's cache, so a retry only costs the part that failed.
-rem  Returns errorlevel 1 after the last attempt fails.
+rem  a SINGLE request, while a 1 GB install makes many. When the whole run fails
+rem  part-way pip just exits and the user has to start over by hand. Wheels
+rem  already downloaded stay in pip's cache, so a retry only costs the part that
+rem  failed. Returns errorlevel 1 after the last attempt fails.
+rem
+rem  Takes the package list as %* because each tier installs a different set.
 rem ---------------------------------------------------------------------------
 :pip_retry
+set "INSTALL_PKGS=%*"
 set /a "TRY_N=1"
 set "WAIT_S=5"
 set "MAX_TRY=%STEP_RETRIES%"
 echo %MAX_TRY%| findstr /r "^[0-9][0-9]*$" >nul || set "MAX_TRY=3"
 :pip_retry_loop
-echo       Command: %PY% -m pip install %PIP_ARGS% %GPU_PACKAGES%
-%PY% -m pip install --upgrade --disable-pip-version-check %PIP_ARGS% %GPU_PACKAGES%
+echo       Command: %PY% -m pip install %PIP_ARGS% %INSTALL_PKGS%
+%PY% -m pip install --upgrade --disable-pip-version-check %PIP_ARGS% %INSTALL_PKGS%
 if not errorlevel 1 exit /b 0
 if !TRY_N! GEQ !MAX_TRY! (
   echo.
@@ -604,8 +788,15 @@ if !TRY_N! GEQ !MAX_TRY! (
   exit /b 1
 )
 echo.
-echo [!] Attempt !TRY_N! failed. Retrying in !WAIT_S! seconds ^(already-downloaded
-echo     packages are reused, not fetched again^)...
+rem  *** MEASURED TRAP *** the pipe form below is deliberate. Writing
+rem  `echo [!TRY_N!] failed ...` DOES NOT expand the variables: the `|` right
+rem  after `echo` makes cmd treat the `!` as a command separator, and the line
+rem  came out as the literal garbage `[TRY_NWAIT_S seconds (already-downloaded`.
+rem  Setting plain variables first and echoing those is the form that works.
+set "MSG_TRY=!TRY_N!"
+set "MSG_WAIT=!WAIT_S!"
+echo [!MSG_TRY!] Install attempt failed. Retrying in !MSG_WAIT! seconds.
+echo     Already-downloaded packages are reused, not fetched again.
 rem  ping is the portable sleep in cmd; "timeout" refuses to run without a console.
 ping -n !WAIT_S! 127.0.0.1 >nul
 set /a "TRY_N+=1"
