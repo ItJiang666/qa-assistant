@@ -1,0 +1,25 @@
+# config/application.yml.example —— OCR 解释器覆盖配置的示例
+#
+# 用法：复制成同目录下的 application.yml 再改。Spring Boot 会自动读**工作目录下**
+# config/application.yml，它的优先级高于 jar 内置的 application.yml。
+#
+# ── 什么时候需要它 ────────────────────────────────────────────────────────
+# qa.ocr.python 留空时，应用按 PATH 顺序找 `python3` / `python`。
+# 一台机器上常有多套 Python（venv / conda / Store 版），自动探测可能挑中一个
+# **没装 rapidocr / onnxruntime-gpu 的**解释器，表现是"OCR 装了却用不了"或
+# "装了 GPU 却还在用 CPU"。实测踩过：依赖装在 ~/qa-ocr，而 PATH 里第一个
+# python3 是另一个虚拟环境里的 CPU 版 onnxruntime。
+#
+# ── 怎么填 ────────────────────────────────────────────────────────────────
+# 填**绝对路径**，指向你真正装了依赖的那个解释器。
+#   Linux / WSL : /home/<用户名>/qa-ocr/bin/python3
+#   Windows     : C:\Users\<用户名>\qa-ocr\Scripts\python.exe
+#
+# ── 注意 ──────────────────────────────────────────────────────────────────
+# 这个文件含本机绝对路径，**不要提交到仓库**（.gitignore 已忽略 config/application.yml）。
+# 交付包里也不应带它：你机器上的路径在别人机器上并不存在。
+
+qa:
+  ocr:
+    # 留空 = 自动探测（默认）。需要指定时填绝对路径，例如：
+    python:
