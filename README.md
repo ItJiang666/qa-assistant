@@ -302,6 +302,18 @@ python -c "import sys, rapidocr, onnxruntime, pymupdf; print('OCR 依赖就绪')
 > `无法将"enable-gpu.cmd"项识别为 cmdlet、函数、脚本文件或可运行程序的名称`（看着像文件不存在，
 > 其实是执行策略）。双击运行、或在 cmd 里敲 `enable-gpu.cmd` 都正常。
 
+> ⚠️ **如果这台机器上有多个 Python，务必确认应用用的是哪一个。**
+> 应用按 PATH 顺序找 `python3` / `python`，可能挑中一个**没装依赖的**解释器 ——
+> 表现是「脚本明明装好了，应用却说缺少 OCR 依赖」或「装了 GPU 却还在用 CPU」。
+> 实测踩过：依赖装在 `~/qa-ocr`，而 PATH 里第一个 `python3` 属于另一个虚拟环境
+> （里面是 **CPU 版** onnxruntime），于是 GPU 一直不生效。
+>
+> 两个办法：① 把依赖装进 PATH 里第一个解释器（脚本默认就是这么做的，装完不用额外配置）；
+> ② 或者显式指定 —— 在**启动 jar 的那个目录**下建 `config/application.yml`，
+> 写入 `qa: ocr: python: <解释器绝对路径>`。字段说明与两条平台示例见仓库里的
+> `config/application.yml.example`（**别把真正的 `config/application.yml` 提交到仓库**，
+> 它含本机绝对路径，交付包里也不该带它）。
+
 > **为什么第 4 步必须在这里做**：`onnxruntime` 只是**推理后端**，真正认字的是
 > `rapidocr`，拆页的是 `pymupdf`，这两个**不会**被 `onnxruntime-gpu` 带进来。
 > 所以"只装 GPU 包"的机器依然做不了 OCR。脚本把它们一起装上，
