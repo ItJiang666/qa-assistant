@@ -107,6 +107,87 @@ NOISE_MAX_LEN = 2
 # 连续重复次数达到此值时只保留一行（扫描件的页眉页脚会逐页重复）
 DEDUP_RUN = 3
 
+# CUDA/CUDNN 失败的特征串。抓到任意一个，就说明"执行层"坏了 —— 而这类失败
+# **不会抛 Python 异常**，只往 stderr 打日志然后正常返回，所以必须主动抓 stderr。
+CUDA_ERROR_MARKERS = (
+    "CUDNN failure",
+    "CUDNN_STATUS",
+    "cuda_call.cc",
+    "CUDA failure",
+    "CUDA_ERROR",
+    "no kernel image",
+    "onnxruntime_providers_cuda",
+)
+
+
+class CaptureStderr:
+    """临时把进程 stderr 重定向到文件，退出时可读回内容。
+
+    <h2>为什么需要它（2026-10-14 实测）</h2>
+    GPU 执行失败时 onnxruntime **不抛异常**，只在 stderr 打一行：
+
+        [E:onnxruntime:Default, cuda_call.cc:148 onnxruntime::CudaCall]
+        CUDNN failure 5003: CUDNN_STATUS_EXECUTION_FAILED_CUDART ; GPU=0
+
+    然后照常返回（结果是空的）。于是应用只能看到"这个文件没识别出文字"，
+    而真实原因是"GPU 算不出来"—— 用户和开发者都会被这句话带偏。
+    这里把 stderr 抓下来，作为"空结果"时的证据。
+
+    <h2>两个实现细节</h2>
+      * 用 `os.dup2` 在**文件描述符层**重定向，这样 C/C++ 层写 fd 2 的日志也能抓到
+        （换 `sys.stderr` 只能拦 Python 层的 print）。
+      * 用 `tempfile.mkstemp` 而不是 `TemporaryFile`：Windows 上后者的文件句柄
+        行为有平台差异，`dup2` 到它上面不稳。
+    """
+
+    def __init__(self) -> None:
+        self._saved: int | None = None
+        self._path = ""
+        self._chunks: list[bytes] = []
+
+    def __enter__(self):
+        import tempfile
+
+        fd, self._path = tempfile.mkstemp(prefix="qaocr-stderr-", suffix=".log")
+        os.close(fd)
+        self._handle = open(self._path, "wb")
+        sys.stderr.flush()
+        self._saved = os.dup(2)
+        os.dup2(self._handle.fileno(), 2)
+        return self
+
+    def __exit__(self, *exc):
+        sys.stderr.flush()
+        if self._saved is not None:
+            os.dup2(self._saved, 2)
+            os.close(self._saved)
+            self._saved = None
+        try:
+            self._handle.close()
+            with open(self._path, "rb") as fh:
+                self._chunks.append(fh.read())
+        except Exception:
+            pass
+        finally:
+            try:
+                os.unlink(self._path)
+            except Exception:
+                pass
+        return False
+
+    def cuda_errors(self) -> list[str]:
+        """返回捕获到的 CUDA/CUDNN 报错行（去重、限长）。"""
+        text = b"".join(self._chunks).decode("utf-8", "replace")
+        hits: list[str] = []
+        for line in text.splitlines():
+            if any(marker in line for marker in CUDA_ERROR_MARKERS):
+                clean = line.strip()
+                if len(clean) > 300:
+                    clean = clean[:300] + "..."
+                if clean and clean not in hits:
+                    hits.append(clean)
+        return hits[:5]
+
 
 def _package_version(name: str) -> str:
     """读已安装包的真实版本号。
@@ -348,7 +429,51 @@ def _cuda_session_selftest(onnxruntime) -> tuple[bool, str]:
 
     if not active or active[0] != "CUDAExecutionProvider":
         return False, "会话实际执行器为 %s（CUDA 运行库未加载成功）" % (active or ["?"])
-    return True, "会话执行器 %s" % active[0]
+
+    # ------------------------------------------------------------------
+    #  ★ 光"建起会话"还不够，必须**真跑一次前向并比对结果** ★
+    #
+    #  <h2>为什么（2026-10-14 在干净机器上实测出来的，代价很大）</h2>
+    #  一台完全干净的 Windows 机器（RTX 4060 Laptop + 驱动 596.36 + Python 3.13.16）：
+    #
+    #      执行器名单    : 含 CUDAExecutionProvider
+    #      会话实际执行器: ['CUDAExecutionProvider', 'CPUExecutionProvider']   ← 看起来完美
+    #      然后真实 OCR  : 38 页全部 0 字，日志里是
+    #          [E:onnxruntime, cuda_call.cc] CUDNN failure 5003:
+    #          CUDNN_STATUS_EXECUTION_FAILED_CUDART ; GPU=0
+    #
+    #  结论：**"执行器注册了 + DLL 加载了 + 会话建起来了"三件事全部成立，
+    #  GPU 依然算不出东西。** 旧版自检只验到"建会话"，所以在干净环境里
+    #  100% 假通过，把用户直接带进坑里。唯一无法伪造的判据是：跑一次、看结果对不对。
+    #
+    #  <h2>两个容易做错的细节</h2>
+    #   ① 输入形状**必须与模型声明的 (1,3,32,32) 一致**。用 (1,3,2,2) 之类的小数组，
+    #      onnxruntime 会抛 `INVALID_ARGUMENT: Got invalid dimensions`，
+    #      于是所有环境都被误判成前向失败（这个错我犯过）。
+    #   ② 输入**必须含负数**，Relu 的输出才是可判定的 max(0,x)；
+    #      全正数输入下"算对了"和"算错了"可能给出同一结果。
+    # ------------------------------------------------------------------
+    try:
+        import numpy as np
+    except Exception as exc:
+        return False, "numpy 不可用，无法做前向验证：%s" % exc
+
+    rng = np.random.RandomState(20261014)
+    x = (rng.rand(1, 3, 32, 32).astype(np.float32) - 0.5) * 4.0
+    expected = np.maximum(x, 0.0)
+    try:
+        got = session.run(None, {"x": x})[0]
+    except Exception as exc:
+        return False, "前向执行抛异常：%s: %s" % (
+            type(exc).__name__, str(exc).splitlines()[0][:200])
+
+    if got.shape != expected.shape:
+        return False, "前向输出形状异常：%s（期望 %s）" % (got.shape, expected.shape)
+    if not np.allclose(got, expected, rtol=1e-4, atol=1e-5):
+        return False, "前向输出与 CPU 期望不一致（GPU 算错了）：max|diff|=%g" % float(
+            np.max(np.abs(got - expected)))
+
+    return True, "会话执行器 %s，且真实前向结果与 CPU 一致" % active[0]
 
 
 def _preload_cuda_libs(dirs: list[str]) -> tuple[int, list[str]]:
@@ -455,7 +580,9 @@ def configure_gpu(use_cuda: bool) -> dict:
     return {
         "enabled": True,
         "providers": providers,
-        "reason": "CUDA 可用并已建会话验证（%s）" % note,
+        # 措辞必须点到"真实前向"：只写"已建会话"会让人以为验过了，
+        # 而 2026-10-14 的故障恰恰是"会话建得起来、前向算不出来"。
+        "reason": "CUDA 可用且真实前向验证通过（%s；%s）" % (detail, note),
     }
 
 
@@ -892,24 +1019,28 @@ def main() -> int:
     page_texts_by_index: dict[int, str] = {}
     confidences: list[float] = []
     pages_with_text = 0
+    # 全程捕获 stderr：GPU 执行失败**不抛异常**，只往这里打 CUDNN 报错。
+    # 见 CaptureStderr 的注释 —— 不抓这一段，失败就会伪装成"这个文件没有文字"。
+    stderr_capture = CaptureStderr()
     try:
         zoom = args.dpi / 72.0
         matrix = pymupdf.Matrix(zoom, zoom)
-        for index in range(total_pages):
-            page = doc.load_page(index)
-            pix = page.get_pixmap(matrix=matrix, alpha=False)
-            png_bytes = pix.tobytes("png")
+        with stderr_capture:
+            for index in range(total_pages):
+                page = doc.load_page(index)
+                pix = page.get_pixmap(matrix=matrix, alpha=False)
+                png_bytes = pix.tobytes("png")
 
-            kept, kept_scores = recognize_bitmap(engine, png_bytes, args.min_confidence)
-            if kept:
-                pages_with_text += 1
-                confidences.extend(kept_scores)
-                joined = "\n".join(kept)
-                page_texts.append("[第 %d 页]\n%s" % (index + 1, joined))
-                page_texts_by_index[index] = joined
-            # 逐页报进度：38 页要跑几十秒，没有反馈时用户会以为卡死
-            report({"stage": "page", "page": index + 1, "total": total_pages,
-                    "pagesWithText": pages_with_text}, args)
+                kept, kept_scores = recognize_bitmap(engine, png_bytes, args.min_confidence)
+                if kept:
+                    pages_with_text += 1
+                    confidences.extend(kept_scores)
+                    joined = "\n".join(kept)
+                    page_texts.append("[第 %d 页]\n%s" % (index + 1, joined))
+                    page_texts_by_index[index] = joined
+                # 逐页报进度：38 页要跑几十秒，没有反馈时用户会以为卡死
+                report({"stage": "page", "page": index + 1, "total": total_pages,
+                        "pagesWithText": pages_with_text}, args)
     except Exception as exc:
         doc.close()
         return fail(EXIT_INTERNAL, "识别过程中出错：%s" % exc)
@@ -942,6 +1073,20 @@ def main() -> int:
     merged = "\n".join(dedup_repeated_lines(merged.split("\n"))).strip()
 
     if not merged:
+        # 空结果有两种完全不同的原因，必须分清 —— 这是 2026-10-14 那台干净机器
+        # 用一整晚的排查换来的结论：明明是 GPU 执行失败，却报成"这个文件没有文字"，
+        # 于是一直在查 PDF 和参数，而真正的问题在 CUDA 运行库。
+        cuda_errors = stderr_capture.cuda_errors()
+        if cuda_errors and gpu.get("enabled"):
+            return fail(
+                EXIT_EMPTY_RESULT,
+                "GPU 推理失败，因此没能识别出文字：%s"
+                "（驱动与 CUDA 运行库可能不匹配；可先用 --use-gpu off 走 CPU 验证文件本身没问题）"
+                % cuda_errors[0],
+                totalPages=total_pages,
+                imageCount=images_considered,
+                gpuError=cuda_errors,
+            )
         return fail(
             EXIT_EMPTY_RESULT,
             "未能从该文件中识别出文字"

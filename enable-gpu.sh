@@ -115,6 +115,9 @@ SPEEDTEST_MB="${QA_GPU_SPEEDTEST_MB:-2}"
 #  脚本所在目录（用于定位 deploy/ocr/qa_speedtest.py）
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+#  最近一次 probe_candidate 的结论 JSON（供 probe_reason / probe_print_evidence 解析）
+PROBE_JSON=""
+
 #  pip 的网络参数。默认 --timeout 15 秒对 400 MB 的包太短：
 #  慢网下一次卡顿就整包重来，这是把 `--timeout 60` 提上来的原因。
 PIP_NET_OPTS="--retries 10 --timeout 60"
@@ -450,9 +453,106 @@ install_tier() {
   deps=$(tier_field "$code" 6)
   echo "      档位：$name"
   echo "      包  ：$ortspec  +  $deps"
+  #  ⚠️ `--force-reinstall` 不能省（实测）：`onnxruntime-gpu` 的不同版本**文件落在
+  #     同一个目录**（`site-packages/onnxruntime`），pip 却把它们记成两条独立记录。
+  #     换档/换版本时若不加这个参数，pip 会认为"已满足"而静默跳过，
+  #     **版本号不变、库却还是旧的** —— 表现就是"换了档位但一点变化都没有"。
   # shellcheck disable=SC2086
-  pip_retry "安装 $name 运行库" "$PY" -m pip install --upgrade \
+  pip_retry "安装 $name 运行库" "$PY" -m pip install --upgrade --force-reinstall \
     --disable-pip-version-check $(pip_args) "$ortspec" $deps
+}
+
+# ---------------------------------------------------------------------------
+#  probe_candidate <档位代号> <驱动版本> <显卡名> —— 「隔离试装 + 真实前向验证」
+#
+#  <h2>为什么必须这么做（2026-10-14 在干净机器上踩出来的，代价是一整晚）</h2>
+#  旧流程是「先装进用户环境 → 再自检」，而自检只到「建起了 CUDA 会话」这一层。
+#  在一台**完全干净**的 Windows 机器上（RTX 4060 Laptop + 驱动 596.36 +
+#  Python 3.13.16），脚本打印了：
+#
+#      PROBE session providers: CUDAExecutionProvider|CPUExecutionProvider
+#      [OK] GPU acceleration is ENABLED -- and a CUDA session was really built.
+#
+#  然后真实 OCR **38 页一个字都没认出来**，onnxruntime 日志里是
+#      CUDNN failure 5003: CUDNN_STATUS_EXECUTION_FAILED_CUDART ; GPU=0
+#
+#  也就是说：「执行器注册了 + DLL 加载了 + 会话建起来了」三条全成立，GPU 依然算不出东西。
+#  所以旧自检在干净环境里 **100% 假通过**，而且装错了还把状态留在用户环境里。
+#
+#  改法：先在**临时 venv** 里试装，用 qa_gpu_probe.py 跑一次**真实前向**（Relu 输出
+#  与 CPU 逐元素比对），通过了才落地到用户环境。任何"装得上但用不了"的组合
+#  都会在落地**之前**被淘汰 —— 脚本从此不可能假通过。
+#
+#  <h2>为什么验证逻辑放在 Python 里</h2>
+#  .sh 和 .cmd 共用同一份 qa_gpu_probe.py，避免两版实现各自漂移（这是本项目
+#  反复踩过的坑：探测方式一旦和运行时不一致，"自检通过"就证明不了任何事）。
+# ---------------------------------------------------------------------------
+probe_candidate() {
+  local code="$1" drv="$2" gpu="$3"
+  local ortspec deps name
+  name=$(tier_field "$code" 2)
+  ortspec=$(tier_field "$code" 5)
+  deps=$(tier_field "$code" 6)
+
+  local probe="${SCRIPT_DIR:-.}/deploy/ocr/qa_gpu_probe.py"
+  [ -f "$probe" ] || probe="$SCRIPT_DIR/qa_gpu_probe.py"
+  if [ ! -f "$probe" ]; then
+    echo "[i] 没找到 qa_gpu_probe.py，退回旧版自检（无法做隔离验证）。" >&2
+    install_tier_with_fallback "$code" && gpu_selftest
+    return $?
+  fi
+
+  local tmpenv="${TMPDIR:-/tmp}/qa-gpu-try-$$"
+  rm -rf "$tmpenv"
+
+  #  包列表用 `;` 分隔后整体作为一个参数传给 --pkgs：
+  #  带版本约束的项（如 `nvidia-cudnn-cu13~=9.0`）含 `~` `=` 等字符，
+  #  在 shell 里按空格拆再拼回去容易散架，索性由探测器自己拆。
+  local pkgs
+  pkgs=$(printf '%s;%s' "$ortspec" "$deps" | tr ' ' ';')
+
+  local -a cmd=("$PY" "$probe" --json-only
+                --pkgs "$pkgs"
+                --require numpy onnxruntime rapidocr
+                --target-env "$tmpenv"
+                --install-first
+                --python "$PY"
+                --retries "$STEP_RETRIES" --timeout 60)
+  [ -n "$SRC_INDEX" ] && cmd+=(--index "$SRC_INDEX" --extra-index "$PYPI_INDEX")
+  [ -n "$PROXY" ]     && cmd+=(--proxy "$PROXY")
+  cmd+=(--force-reinstall)
+
+  echo "      档位：$name"
+  echo "      包  ：$ortspec  +  $deps"
+  local out rc=0
+  out=$("${cmd[@]}" 2>&1) || rc=$?
+  echo "$out" | grep -v '^###QAGPUPROBE###' | sed 's/^/      /' | tail -n 12
+
+  PROBE_JSON=$(echo "$out" | grep -o '###QAGPUPROBE###.*###END###' | tail -n1 \
+               | sed 's/###QAGPUPROBE###//; s/###END###//')
+  rm -rf "$tmpenv"
+  return $rc
+}
+
+#  probe_reason <json> —— 从探测结论里取人话原因（不依赖 jq：目标机器未必有）
+probe_reason() {
+  python3 -c 'import json,sys
+try:
+    d = json.loads(sys.argv[1])
+    print("%s：%s" % (d.get("stage", "?"), d.get("reason", "?")))
+except Exception:
+    print("（探测结论无法解析）")' "$1" 2>/dev/null || echo "（探测结论无法解析）"
+}
+
+#  probe_print_evidence <json> —— 把 CUDA/CUDNN 报错原文打出来当证据
+probe_print_evidence() {
+  python3 -c 'import json,sys
+try:
+    d = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(0)
+for e in (d.get("cuda_errors") or [])[:3]:
+    print("      " + e)' "$1" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -474,9 +574,28 @@ install_tier() {
 #     脚本就会误报"所有档位都装不上"。Windows 版不受影响，两边机制不同。
 # ---------------------------------------------------------------------------
 gpu_selftest() {
-  local probe
-  probe=$(mktemp "${TMPDIR:-/tmp}/qa-gpu-probe-XXXXXX.py" 2>/dev/null || echo "/tmp/qa-gpu-probe-$$.py")
-  cat > "$probe" <<'PYEOF'
+  #  v1.35：优先走 qa_gpu_probe.py —— 它除了建会话，还会**真跑一次前向并比对结果**。
+  #  只"建起会话"是不够的：实测「执行器注册 + DLL 加载 + 会话建成」三条全成立，
+  #  真实推理依然可以全部失败（CUDNN_STATUS_EXECUTION_FAILED_CUDART）。
+  local probe="${SCRIPT_DIR:-.}/deploy/ocr/qa_gpu_probe.py"
+  [ -f "$probe" ] || probe="$SCRIPT_DIR/qa_gpu_probe.py"
+  if [ -f "$probe" ]; then
+    local out rc=0
+    out=$("$PY" "$probe" --json-only --require numpy onnxruntime 2>&1) || rc=$?
+    echo "$out" | grep -v '^###QAGPUPROBE###' | sed 's/^/  /'
+    if [ "$rc" -eq 0 ]; then
+      return 0
+    fi
+    PROBE_JSON=$(echo "$out" | grep -o '###QAGPUPROBE###.*###END###' | tail -n1 \
+                 | sed 's/###QAGPUPROBE###//; s/###END###//')
+    echo "  [自检失败] $(probe_reason "$PROBE_JSON")"
+    probe_print_evidence "$PROBE_JSON"
+    return 1
+  fi
+
+  local probe_py
+  probe_py=$(mktemp "${TMPDIR:-/tmp}/qa-gpu-probe-XXXXXX.py" 2>/dev/null || echo "/tmp/qa-gpu-probe-$$.py")
+  cat > "$probe_py" <<'PYEOF'
 import ctypes, glob, os, sys
 # 平台判定用 os.name，而不是 sys.platform 前缀，和 qa_ocr.py 保持一致
 pats = ('*/bin', '*/bin/x86_64', '*/*/bin', '*/*/bin/x86_64') if os.name == 'nt' \
@@ -733,7 +852,9 @@ EOF
   fi
 
   echo "[5/6] 将按顺序尝试这些档位：$CANDIDATES"
-  echo "      说明：驱动下限只用来决定'值不值得试'，能不能用由**真建会话**裁决。"
+  echo "      说明：驱动下限只用来决定'值不值得试'；每一档都在**隔离的临时环境**里"
+  echo "            试装，并用**真实前向**（Relu 输出与 CPU 逐元素比对）裁决，"
+  echo "            通过的才会装进你的正式环境 —— 所以本脚本不会假通过。"
   echo "      网络  ：$PIP_NET_OPTS$(pip_supports_resume && echo ' --resume-retries 5')"
   echo
   if [ -n "$PRE" ]; then
@@ -771,36 +892,56 @@ EOF
     echo "------------------------------------------------------------"
     echo "[$TIER_TRIED] 尝试 $(tier_field "$code" 2)"
     echo "------------------------------------------------------------"
-    if [ "$TIER_TRIED" -gt 1 ]; then
-      purge_gpu_packages
-    fi
-    if ! install_tier_with_fallback "$code"; then
-      echo
-      echo "[!] $(tier_field "$code" 2) 的包没装上（网络或源的问题）。"
-      echo "    重试也不会从头下载：已下完的包都在 pip 缓存里。"
-      echo "    若换过源可再试：--source / --proxy，见 --help。"
-      TIER_LAST_FAIL="$code"
-      continue
-    fi
     echo
-    echo "      自检：用 rapidocr 自带的模型建一个 CUDA 会话（约 3 秒）..."
-    if gpu_selftest; then
+    echo "      验证：在一个**隔离的临时环境**里试装，并用真实前向验证（约 1~2 分钟）..."
+    probe_rc=0
+    probe_json=$(probe_candidate "$code" "$DRV" "$GPUNAME") || probe_rc=$?
+    if [ "$probe_rc" -eq 0 ]; then
       TIER_OK="$code"
       break
     fi
     echo
-    echo "[!] $(tier_field "$code" 2) 的会话建不起来 —— 这一档在按本机驱动/显卡不可用。"
+    echo "[!] $(tier_field "$code" 2) 未通过验证 —— 这一档在本机不可用。"
+    echo "    原因：$(probe_reason "$probe_json")"
+    probe_print_evidence "$probe_json"
     TIER_LAST_FAIL="$code"
   done
 
-  # ---- 结论 ----------------------------------------------------------------
+  # ---- 落地：验证通过的档位才装进用户环境 ---------------------------------
+  #  到这里说明上面已经有一个档位在**隔离环境里验证通过**了。
+  #  现在把它装进用户真正要用的解释器，然后**再验一次** ——
+  #  因为隔离环境和用户环境的差别（已有的旧包、权限、Python 版本细节）
+  #  本身就可能让结果不同，不能假定"隔离能跑 = 用户环境也能跑"。
   if [ -n "$TIER_OK" ]; then
     echo
     echo "============================================================"
-    echo "  [OK] GPU 加速已启用 —— 档位：$(tier_field "$TIER_OK" 2)"
-    echo "       并且**已实测建会话成功**，不是只看执行器名单。"
+    echo "  验证通过的档位：$(tier_field "$TIER_OK" 2)"
+    echo "  现在装进正式环境：$PY"
+    echo "============================================================"
+    purge_gpu_packages
+    if ! install_tier_with_fallback "$TIER_OK"; then
+      echo
+      echo "[X] 验证通过的档位却装不进正式环境（网络/权限问题）。"
+      echo "    隔离环境已经证明这套组合在本机可用，重跑本脚本即可（已下载的包会复用）。"
+      exit 1
+    fi
     echo
-    echo "  重启应用后随便识别一份扫描件，到日志里搜「OCR 使用 GPU 加速」确认。"
+    echo "      在正式环境里复验一次（这一步不能省：隔离环境与用户环境并不等同）..."
+    if ! gpu_selftest; then
+      echo
+      echo "[X] 隔离环境通过、正式环境却没通过 —— 说明你这台机器的目标解释器里有干扰。"
+      echo "    最常见的原因：**同目录下混着两代 CUDA 包**（pip 记录里看得见、文件也还在）。"
+      echo "    可先执行下面的命令清干净再重跑本脚本："
+      echo "      $PY -m pip uninstall -y onnxruntime onnxruntime-gpu"
+      echo "      $PY -m pip list --format=freeze | grep -i nvidia   # 再逐个卸载列出来的包"
+      exit 1
+    fi
+    echo
+    echo "============================================================"
+    echo "  [OK] GPU 加速已启用 —— 档位：$(tier_field "$TIER_OK" 2)"
+    echo "       已通过**真实前向验证**（不是只看执行器名单，也不是只看建没建起会话）。"
+    echo
+    echo "  重启应用后随便识别一份扫描件，到日志里搜「启用 GPU」确认。"
     echo "  预期效果（38 页扫描件实测）：约 47 秒 → 约 17 秒。"
     echo "  随时可用 --verify 复查当前是否生效。"
     echo "============================================================"
@@ -809,16 +950,20 @@ EOF
 
   echo
   echo "============================================================"
-  echo "  [!] 试过的档位都建不起 CUDA 会话 —— GPU 不会生效（会自动用 CPU）。"
+  echo "  [!] 所有候选档位都没通过验证 —— GPU 不会生效（会自动用 CPU）。"
   echo
-  echo "  这一步是特意加的：只装 onnxruntime-gpu 时，"
-  echo "  get_available_providers() 也会列出 CUDAExecutionProvider，"
-  echo "  但真正建会话时会因缺少 CUDA/cuDNN 运行库而静默回落 CPU。"
-  echo "  上面的 PROBE 行指出了卡在哪一步。常见原因："
-  echo "    - 驱动太旧（CUDA 11.8 也要求 >= $CUDA11_MIN_DRIVER）→ 升级驱动"
+  echo "  每一档的失败原因已经在上面逐条打印（含 CUDA/CUDNN 报错原文）。"
+  echo "  这套流程是 v1.35 特意加的：旧版只验证到「建起 CUDA 会话」，"
+  echo "  而实测存在「执行器注册了、DLL 加载了、会话也建起来了，"
+  echo "  但一跑推理就 CUDNN_STATUS_EXECUTION_FAILED_CUDART」的情况 ——"
+  echo "  旧版会把它报成成功，用户装完才发现 38 页一个字都认不出来。"
+  echo
+  echo "  常见原因与对策："
+  echo "    - 驱动版本低于所装 CUDA 运行库的要求 → 升级 NVIDIA 驱动后重跑"
   echo "    - 显卡代次过旧，CUDA 运行库已不支持 → 只能用 CPU"
+  echo "    - 同目录混装了两代 CUDA 包 → 按上面的提示清干净后重跑"
   echo "    - 网络把包下坏了 → 重跑本脚本（已下的会复用）"
-  echo "  当前环境仍可正常跑 OCR，只是走 CPU。"
+  echo "  当前环境仍可正常跑 OCR，只是走 CPU（功能不受影响）。"
   echo "============================================================"
   exit 1
 }

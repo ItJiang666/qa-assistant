@@ -86,6 +86,13 @@ rem  it the script falls back to the official source and may never finish
 rem  on a slow line.
 copy /y "deploy\ocr\qa_speedtest.py" "!STAGE!\deploy\ocr\" >nul
 
+rem  qa_gpu_probe.py must ship too: enable-gpu.cmd/.sh call it to try each
+rem  CUDA tier in an ISOLATED temp venv and accept one only after a REAL
+rem  forward pass (relu output vs CPU). Measured on a clean machine: the old
+rem  flow reported success while every page OCRed to nothing, because its
+rem  self-test only built a session and never ran inference.
+copy /y "deploy\ocr\qa_gpu_probe.py" "!STAGE!\deploy\ocr\" >nul
+
 rem 防止误发：.env 绝不能进包（哪怕它存在于工作目录）
 if exist "!STAGE!\.env" del /q "!STAGE!\.env"
 

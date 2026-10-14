@@ -103,6 +103,9 @@ cp deploy/ocr/requirements.txt     "$STAGE/deploy/ocr/"
 #  GPU 运行库 1~1.5 GB，实测各源吞吐差约 18 倍（4.31 MB/s vs 0.24 MB/s），
 #  少了它脚本只能退回官方源，慢网下等于装不完。
 cp deploy/ocr/qa_speedtest.py       "$STAGE/deploy/ocr/"
+#  qa_gpu_probe.py：enable-gpu.sh 用它做「隔离试装 + 真实前向验证」，
+#  通过的组合才落地 —— 少了它脚本会退回旧的浅自检（会假通过）。
+cp deploy/ocr/qa_gpu_probe.py       "$STAGE/deploy/ocr/"
 
 chmod +x "$STAGE/start.sh" "$STAGE/enable-gpu.sh" "$STAGE/enable-ocr.sh"
 

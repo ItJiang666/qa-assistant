@@ -1,0 +1,5 @@
+# 覆盖 jar 内置配置：把 OCR 指向装了 GPU 依赖的虚拟环境
+# 依据：qa.ocr.python 留空时按 PATH 找 python3，会命中 pytorch_env 里的 CPU 版 onnxruntime
+qa:
+  ocr:
+    python: /home/jiang/qa-ocr/bin/python3

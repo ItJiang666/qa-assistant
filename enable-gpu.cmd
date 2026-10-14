@@ -321,8 +321,8 @@ echo.
 
 rem ---- 5+6. try tiers in order, self-test each, step down on failure ---------
 echo [5/6] Will try these tiers in order:!CANDIDATES!
-echo       A tier is accepted only if a real CUDA session can be built. The
-echo       driver floor only decides which tiers are worth the download.
+echo       A tier is accepted only after a REAL forward pass succeeds in an
+echo       isolated temp venv. The driver floor only decides what is worth trying.
 echo.
 if defined PRE (
   echo [i] --check given: NOT installing. Re-run without --check to proceed.
@@ -361,9 +361,39 @@ if errorlevel 1 (
   goto :fail
 )
 
-rem  Build the self-test file ONCE, outside the loop.
-call :write_probe
+rem  ==========================================================================
+rem  v1.35 -- TRY -> VERIFY -> COMMIT, instead of "install then hope".
+rem
+rem  WHAT WAS WRONG (measured 2026-10-14, on a CLEAN Windows machine, RTX 4060
+rem  Laptop + driver 596.36 + Python 3.13.16):
+rem
+rem    the old flow installed a tier straight into the user environment and then
+rem    ran a self-test that only checked whether a CUDA session could be BUILT.
+rem    It printed:
+rem        PROBE session providers: CUDAExecutionProvider|CPUExecutionProvider
+rem        [OK] GPU acceleration is ENABLED -- and a CUDA session was really built.
+rem    ...and then real OCR produced ZERO text on all 38 pages, with onnxruntime
+rem    logging CUDNN failure 5003: CUDNN_STATUS_EXECUTION_FAILED_CUDART.
+rem
+rem  So "provider registered + DLLs loaded + session built" can ALL be true while
+rem  the GPU still cannot compute. The old self-test therefore reported a 100%
+rem  false pass on a clean machine, and left the broken state installed.
+rem
+rem  The fix: install each candidate into an ISOLATED TEMP VENV, and accept it
+rem  only after a REAL forward pass matches CPU output element-wise. A tier that
+rem  cannot compute never touches the user environment. The verification itself
+rem  lives in deploy\ocr\qa_gpu_probe.py so the .cmd and .sh versions cannot
+rem  drift apart (a drift here is exactly what makes "self-test passed" mean
+rem  nothing).
+rem
+rem  COST: worst case is ~1 GB per candidate tier; only the accepted tier is
+rem  installed for real. Slower than before, but it cannot hand you a GPU that
+rem  does not work -- which is the whole point.
+rem  ==========================================================================
 
+set "PROBE_JSON="
+set "PROBE_REASON="
+set "PROBE_EVIDENCE="
 set "TIER_OK="
 set "TIER_TRIED=0"
 for %%c in (!CANDIDATES!) do (
@@ -372,30 +402,75 @@ for %%c in (!CANDIDATES!) do (
   echo ------------------------------------------------------------
   echo [!TIER_TRIED!] trying tier: %%c
   echo ------------------------------------------------------------
-  rem  Switching tiers MUST remove the previous generation first. The packages
-  rem  differ by name but all drop DLLs into the SAME site-packages\nvidia\**\bin
-  rem  and the SAME onnxruntime directory; leaving cu13 libraries next to a cu12
-  rem  build makes onnxruntime load the wrong one -- which shows up, again, as a
-  rem  SILENT fallback to CPU instead of an error.
-  if !TIER_TRIED! GTR 1 call :purge_gpu_tiers
   call :show_tier "%%c"
-  call :install_tier_with_fallback "%%c"
-  if errorlevel 1 (
+  call :probe_candidate "%%c"
+  if "!PROBE_RC!"=="0" set "TIER_OK=%%c"
+  if not defined TIER_OK (
     echo.
-    echo [!] Tier %%c could not be installed ^(network or source^).
-    echo     A retry does NOT re-download everything: finished wheels stay in
-    echo     pip's cache. Mirrors: see --source / --proxy in --help.
-  ) else (
-    call :run_probe
-    if "!PROBE_RC!"=="0" set "TIER_OK=%%c"
-    if not defined TIER_OK (
-      echo.
-      echo [!] Tier %%c cannot build a CUDA session here. Stepping down.
+    echo [!] Tier %%c did not pass verification -- not usable on this machine.
+    echo     reason: !PROBE_REASON!
+    if defined PROBE_EVIDENCE (
+      echo     evidence from onnxruntime:
+      echo !PROBE_EVIDENCE!
     )
   )
   if defined TIER_OK goto :tier_done
 )
 :tier_done
+if defined TIER_OK goto :commit_tier
+
+echo.
+echo ============================================================
+echo   [!] No candidate tier passed verification.
+echo
+echo   This check exists because a CUDA session can be BUILT successfully and
+echo   still fail on the very first inference -- measured on a clean machine:
+echo   provider registered, DLLs loaded, session created, and then
+echo     CUDNN failure 5003: CUDNN_STATUS_EXECUTION_FAILED_CUDART
+echo   with every page OCRing to nothing. The old self-test called that
+echo   "enabled" and left the broken stack installed.
+echo
+echo   The per-tier reasons are printed above, with the raw onnxruntime lines.
+echo   Common causes:
+echo     - driver older than the CUDA runtime that got installed -> update driver
+echo     - GPU generation no longer supported by the CUDA runtime -> CPU only
+echo     - two CUDA generations mixed in one site-packages -> see the hint below
+echo     - a broken download -> just re-run; finished wheels are reused
+echo   OCR still works on CPU meanwhile.
+echo ============================================================
+goto :fail
+
+rem ---- COMMIT: only now does anything touch the user environment -----------
+:commit_tier
+echo.
+echo ============================================================
+echo   Tier !TIER_OK! passed a REAL forward pass in a temp environment.
+echo   Installing it into the real interpreter now: %PY%
+echo ============================================================
+call :purge_gpu_tiers
+call :install_tier_with_fallback "!TIER_OK!"
+if errorlevel 1 (
+  echo.
+  echo [X] The verified tier failed to install into the real environment.
+  echo     The isolated run proved this combination works on this machine, so
+  echo     re-running the script is enough ^(finished wheels are reused^).
+  goto :fail
+)
+echo.
+echo       Re-verifying inside the REAL environment ^(not optional: an isolated
+echo       venv is NOT the same as the interpreter you already have^)...
+call :run_probe
+if not "!PROBE_RC!"=="0" (
+  echo.
+  echo [X] Passed in isolation, failed here -- something in this interpreter is
+  echo     interfering. Most common cause: TWO CUDA GENERATIONS MIXED in the
+  echo     same site-packages ^(pip keeps separate records, the files collide^).
+  echo     Clean up and re-run:
+  echo       %PY% -m pip uninstall -y onnxruntime onnxruntime-gpu
+  echo       %PY% -m pip list --format=freeze ^| findstr /i nvidia
+  echo     then uninstall every name that command lists, and re-run this script.
+  goto :fail
+)
 
 if defined TIER_OK goto :selftest
 echo.
@@ -583,9 +658,33 @@ rem  as a glob ON PURPOSE (unquoted) so pip expands it; these names match no rea
 rem  files in a normal directory, so the shell passes them through literally.
 rem  Both onnxruntime distributions are removed because they share one directory.
 rem ---------------------------------------------------------------------------
+rem ---------------------------------------------------------------------------
+rem  :purge_gpu_tiers   remove EVERY nvidia package plus both onnxruntime names
+rem
+rem  *** MEASURED BUG, fixed in v1.35 ***
+rem  The previous version ran:  pip uninstall -y onnxruntime onnxruntime-gpu nvidia-*
+rem  cmd does NOT expand wildcards for external programs, so pip received the
+rem  LITERAL string `nvidia-*` and answered "no such package" -- meaning NOT ONE
+rem  nvidia package was ever removed. On a machine that had tried cu12 first, the
+rem  cu12 libraries stayed while cu13 was installed beside them, and onnxruntime
+rem  then loaded the wrong generation. That is the same silent-CPU failure this
+rem  whole script exists to prevent, and it was reproduced on a real machine
+rem  (RTX 4060 Laptop): `pip list` showed BOTH generations, 14 packages, at once.
+rem
+rem  Correct approach: ASK pip what is installed, then uninstall each name.
+rem  The findstr pattern also keeps the two onnxruntime names on the list, which
+rem  is intended -- they share one directory and must be removed together.
+rem ---------------------------------------------------------------------------
 :purge_gpu_tiers
-echo       removing the previous CUDA generation ^(avoid mixing DLLs^)...
-%PY% -m pip uninstall -y -q onnxruntime onnxruntime-gpu nvidia-* >nul 2>nul
+echo       removing any previous CUDA generation ^(avoid mixing DLLs^)...
+set "PURGE_LIST=%TEMP%\qa-gpu-purge.txt"
+%PY% -m pip list --format=freeze 2>nul | findstr /i "nvidia onnxruntime" > "!PURGE_LIST!"
+if exist "!PURGE_LIST!" (
+  for /f "tokens=1 delims=<>=" %%n in (!PURGE_LIST!) do (
+    %PY% -m pip uninstall -y -q %%n >nul 2>nul
+  )
+)
+del "!PURGE_LIST!" >nul 2>nul
 exit /b 0
 
 rem ---------------------------------------------------------------------------
@@ -595,6 +694,80 @@ rem  Nothing may sit between the run and the capture: `set` and `del` overwrite
 rem  errorlevel, and a mis-captured exit code once made a broken check report
 rem  success in this project. Hence this deliberately tiny subroutine.
 rem ---------------------------------------------------------------------------
+rem ---------------------------------------------------------------------------
+rem  :probe_candidate <tier>   isolated install + REAL forward-pass verification
+rem
+rem  Sets PROBE_RC (0 = usable), PROBE_JSON (raw verdict), PROBE_REASON, PROBE_EVIDENCE.
+rem
+rem  Why a temp venv instead of installing straight into the target interpreter:
+rem  the old flow could leave a broken CUDA stack in the user environment when a
+rem  tier turned out to be unusable. With isolation, a failing tier costs only
+rem  download time -- nothing is installed for real until verification passes.
+rem
+rem  The package list is joined with `;` and passed as ONE argument: items carry
+rem  version constraints like `nvidia-cudnn-cu13~=9.0`, whose characters cmd would
+rem  mangle if the list were split on spaces.
+rem ---------------------------------------------------------------------------
+:probe_candidate
+set "PROBE_RC=1"
+set "PROBE_JSON="
+set "PROBE_REASON="
+set "PROBE_EVIDENCE="
+set "TRY_SPEC="
+set "TRY_DEPS="
+call :tier_field "%~1" 5 TRY_SPEC
+call :tier_field "%~1" 6 TRY_DEPS
+set "TRY_PKGS=!TRY_SPEC!;!TRY_DEPS: =;!"
+set "TRY_ENV=%TEMP%\qa-gpu-try-%RANDOM%%RANDOM%"
+
+set "GP_PROBE=%~dp0deploy\ocr\qa_gpu_probe.py"
+if not exist "!GP_PROBE!" set "GP_PROBE=%~dp0qa_gpu_probe.py"
+if not exist "!GP_PROBE!" (
+  echo       qa_gpu_probe.py not found -- falling back to the shallow self-test
+  echo       ^(it cannot do a real forward pass, so it can report a false pass^).
+  call :install_tier_with_fallback "%~1"
+  if errorlevel 1 exit /b 1
+  call :run_probe
+  set "PROBE_REASON=shallow self-test ^(no qa_gpu_probe.py^)"
+  exit /b !PROBE_RC!
+)
+
+echo       verifying in an isolated temp environment with a real forward pass...
+echo       ^(this downloads the tier once; ~1-2 minutes^)
+set "TRY_OUT=%TEMP%\qa-gpu-try-out-%RANDOM%.txt"
+"%PY%" "!GP_PROBE!" --json-only --pkgs "!TRY_PKGS!" --require numpy onnxruntime rapidocr --target-env "!TRY_ENV!" --install-first --force-reinstall --python "%PY%" --retries !STEP_RETRIES! --timeout 60 !PIP_SRC_ARGS! > "!TRY_OUT!" 2>&1
+set "PROBE_RC=!errorlevel!"
+if not "!PROBE_RC!"=="0" (
+  rem  Keep only the tail: pip output can be long and the verdict is the point.
+  for /f "usebackq delims=" %%l in (`powershell -NoProfile -Command "Get-Content -LiteralPath '!TRY_OUT!' -Tail 6"`) do echo       %%l
+)
+set "PROBE_JSON="
+for /f "tokens=2 delims=#" %%j in ('findstr /c:"###QAGPUPROBE###" "!TRY_OUT!"') do set "PROBE_JSON=%%j"
+del "!TRY_OUT!" >nul 2>nul
+if exist "!TRY_ENV!" rd /s /q "!TRY_ENV!" >nul 2>nul
+
+if defined PROBE_JSON call :probe_reason "!PROBE_JSON!"
+exit /b !PROBE_RC!
+
+rem ---------------------------------------------------------------------------
+rem  :probe_reason <json>   turn the verdict into PROBE_REASON / PROBE_EVIDENCE
+rem  No jq: a target machine is not guaranteed to have it.
+rem ---------------------------------------------------------------------------
+:probe_reason
+set "PROBE_REASON="
+set "PROBE_EVIDENCE="
+set "TRY_STAGE="
+set "TRY_WHY="
+for /f "usebackq tokens=1,* delims=|" %%a in (`"%PY%" -c "import json,sys;d=json.loads(sys.argv[1]);print(d.get('stage','?')+'|'+d.get('reason','?'))" "%~1" 2^>nul`) do (
+  set "TRY_STAGE=%%a"
+  set "TRY_WHY=%%b"
+)
+if defined TRY_STAGE set "PROBE_REASON=!TRY_STAGE!: !TRY_WHY!"
+for /f "usebackq delims=" %%e in (`"%PY%" -c "import json,sys;d=json.loads(sys.argv[1]);[print('      '+x) for x in (d.get('cuda_errors') or [])[:3]]" "%~1" 2^>nul`) do (
+  set "PROBE_EVIDENCE=!PROBE_EVIDENCE!%%e"
+)
+exit /b 0
+
 :run_probe
 %PY% "%PROBE%"
 set "PROBE_RC=!errorlevel!"

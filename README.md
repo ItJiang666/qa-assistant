@@ -283,8 +283,24 @@ python -c "import sys, rapidocr, onnxruntime, pymupdf; print('OCR 依赖就绪')
 2. 读 `nvidia-smi`，报出你的显卡型号与驱动版本
 3. 检查驱动是否够新：**需要 ≥ 580**。不够就**明确告诉你去升级驱动**，并改走 CPU；显卡太老同样直接改走 CPU
 4. **装 OCR 基线**（`rapidocr` + `pymupdf`）
-5. 下载并安装 GPU 运行库（约 1.07 GB）
-6. **真·自检：用 rapidocr 自带的模型实际建一个 CUDA 会话**，建得起来才报成功
+5. 逐个候选档位（cu13 → cu12 → cu11）**先在一个隔离的临时环境里试装**
+6. **真实前向验证：跑一次推理，要求输出与 CPU 逐元素一致**；通过了才把这一档装进你的正式环境
+
+> **第 5、6 步为什么必须这样（v1.35 的核心改动）**：旧版是"直接装进你的环境，
+> 然后只验证**能不能建起 CUDA 会话**"。2026-10-14 在一台**完全干净**的 Windows 机器上
+> （RTX 4060 Laptop + 驱动 596.36 + Python 3.13.16）实测：脚本打印
+> `[OK] GPU acceleration is ENABLED`，**但真实 OCR 38 页一个字都没认出来**，
+> onnxruntime 日志里是 `CUDNN failure 5003: CUDNN_STATUS_EXECUTION_FAILED_CUDART`。
+> 也就是说「执行器注册了 + DLL 加载了 + 会话建起来了」三条**全部成立，GPU 依然算不出东西** ——
+> 旧自检在这种机器上 **100% 假通过**，而且装错的状态还留在了用户环境里。
+> 现在改成**隔离试装 + 真实前向验证**：算不出来的档位在落地**之前**就被淘汰，
+> 脚本从此不会把"装上了"当成"能用了"。代价是每个候选档位要下一次（约 1 GB），
+> 换的是"报成功就真的能用"。
+
+> 📌 **在 PowerShell 里怎么启动**：`enable-gpu.cmd` 必须写成 **`.\enable-gpu.cmd`**。
+> PowerShell 出于安全默认**不从当前目录执行命令**，直接敲文件名会报
+> `无法将"enable-gpu.cmd"项识别为 cmdlet、函数、脚本文件或可运行程序的名称`（看着像文件不存在，
+> 其实是执行策略）。双击运行、或在 cmd 里敲 `enable-gpu.cmd` 都正常。
 
 > **为什么第 4 步必须在这里做**：`onnxruntime` 只是**推理后端**，真正认字的是
 > `rapidocr`，拆页的是 `pymupdf`，这两个**不会**被 `onnxruntime-gpu` 带进来。
@@ -320,7 +336,7 @@ python -c "import sys, rapidocr, onnxruntime, pymupdf; print('OCR 依赖就绪')
 | 参数 | 作用 |
 |---|---|
 | `--check` | 只看它打算做什么，**不安装任何东西** |
-| `--verify` | 也**不安装**，只重跑"真建 CUDA 会话"自检 —— 用来回答"现在到底生效没有" |
+| `--verify` | 也**不安装**，只重跑"真实前向"自检 —— 用来回答"现在到底生效没有"（v1.35 起判据是**真跑一次推理并与 CPU 比对**，不再是"建起会话就算过"） |
 | `--cpu` | 等价于 CPU 版（只装基线，不碰 GPU 运行库） |
 | `--source URL` | 换安装源，例如 `--source https://pypi.tuna.tsinghua.edu.cn/simple` |
 | `--proxy ADDR` | 走代理，例如 `--proxy http://127.0.0.1:7890` |
