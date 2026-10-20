@@ -78,32 +78,51 @@ class CaptureStderr:
 
     onnxruntime 的 CUDNN 报错写在 fd 2 上，Python 异常捕获不到；
     不抓这一段，执行失败会伪装成「结果为空」。
+
+    整个重定向是**尽力而为**的：句柄操作失败时静默跳过，绝不能让抓日志
+    这件事把识别本身弄失败（Windows 上 dup2/close 的句柄语义与 POSIX 有差异）。
     """
 
     def __init__(self) -> None:
         self._saved: int | None = None
         self._path = ""
         self._chunks: list[bytes] = []
+        self._handle = None
+        self._active = False
 
     def __enter__(self):
-        import tempfile
+        try:
+            import tempfile
 
-        fd, self._path = tempfile.mkstemp(prefix="qaocr-stderr-", suffix=".log")
-        os.close(fd)
-        self._handle = open(self._path, "wb")
-        sys.stderr.flush()
-        self._saved = os.dup(2)
-        os.dup2(self._handle.fileno(), 2)
+            fd, self._path = tempfile.mkstemp(prefix="qaocr-stderr-", suffix=".log")
+            os.close(fd)
+            self._handle = open(self._path, "wb")
+            self._saved = os.dup(2)
+            os.dup2(self._handle.fileno(), 2)
+            self._active = True
+        except Exception:
+            self._active = False          # 抓不到日志不影响识别
         return self
 
     def __exit__(self, *exc):
-        sys.stderr.flush()
-        if self._saved is not None:
-            os.dup2(self._saved, 2)
-            os.close(self._saved)
+        if self._active:
+            # 先恢复 fd 2 再关句柄；每一步都单独兜住，任何一步失败都不能往上抛
+            try:
+                os.dup2(self._saved, 2)
+            except Exception:
+                pass
+            try:
+                os.close(self._saved)
+            except Exception:
+                pass
             self._saved = None
+            self._active = False
         try:
-            self._handle.close()
+            if self._handle is not None:
+                self._handle.close()
+        except Exception:
+            pass
+        try:
             with open(self._path, "rb") as fh:
                 self._chunks.append(fh.read())
         except Exception:
