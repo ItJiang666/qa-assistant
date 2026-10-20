@@ -2,68 +2,21 @@
 # -*- coding: utf-8 -*-
 """qa-assistant 本地离线 OCR 脚本。
 
-由 Java 侧（`RapidOcrEngine`）以子进程方式调用，**每次调用都是独立一次**：
-启动 → 拆页 → 识别 → 输出 JSON → 退出。刻意不做常驻服务：
+由 Java 侧以子进程方式调用：启动 -> 拆页 -> 识别 -> 输出 JSON -> 退出。
+不常驻：OCR 是偶发重活，冷启动仅约 0.4 s。
 
-  * OCR 是偶发重活，常驻会一直占 200~500 MB 内存；
-  * 子进程崩了不影响主进程，还能被超时强杀；
-  * 冷启动只要 0.4 s，代价可以忽略。
+输入可以是 PDF，也可以是单张图片（PyMuPDF 把图片当作只有一页的文档打开）。
+引擎用 RapidOCR、拆页用 PyMuPDF，模型随 pip 包下发，全程离线。
 
-## 输入：PDF **或**单张图片
-
-PyMuPDF 既能开 PDF，也能直接把 `.jpg/.png/.webp/.bmp` 当"只有一页的文档"打开
-（`page_count == 1`，页面矩形就是图片尺寸，且**文字层恒为空**）。
-所以图片不需要任何特殊分支：它就是"一页、且肯定没有文字层"的扫描件，
-走完全同一条渲染 → 检测的路径。
-
-实测（1200×760 的中文截图，`--dpi 200`）：165 字、置信度 0.9769、1.85 s；
-同一张图塞进 PDF 再识别是 224 字 / 0.9749 —— 多出来的字是"内嵌插图"通道
-把那行重复识别了一遍，**并没有多读到内容**。也就是说图片这条路更干净。
-
-## 为什么全程离线是硬要求
-
-本项目的卖点是"数据不出内网"。扫描件往往是最敏感的材料（合同、档案、证件），
-如果 OCR 这一步把文件传到云端，等于在门口漏了 —— 所以引擎用 RapidOCR
-（ONNX Runtime + PP-OCR 模型，**模型随 pip 包下发**，不联网下载），
-拆页用 PyMuPDF（纯本地）。
-
-## 输出协议（Java 侧按此解析）
-
-stdout 里必须出现且只出现一对哨兵，中间是**单行 JSON**：
-
+输出协议：stdout 中出现一对哨兵，中间是单行 JSON
     ###QAOCR_BEGIN###{"ok":true,...}###QAOCR_END###
 
-用哨兵包裹而不是"假设 stdout 全是 JSON"：第三方库会往 stdout 打日志，
-直接把整段 stdout 当 JSON 解析是迟早会踩的坑。
-
-## 两条识别路径（都产出文本，合并后一起交人工确认）
-
-1. **页面文字**（主流程）：把每页渲染成位图，跑文字检测。
-   扫描件、拍照件走的就是这条。
-2. **内嵌图片里的文字**（补充）：抽取页面中**作为图片插入**的图表、截图、表格照片，
-   各自单独识别。补的是主流程的盲区 —— 文字检测器只会"找字"，
-   它认不出"这块图里有内容"，于是整块跳过。
-
-   对**单张图片输入**这条路径基本是空转：整张图就是页面本身，
-   抽出来的插图与页面内容重复，会被下面的去重逻辑整块丢弃。
-   不做特殊处理 —— 多跑一次的代价远小于为它维护一个分支。
-
-用 `--detect-images off` 可以关掉第 2 条，回到旧行为。
-
-## 退出码（Java 侧据此给不同提示，比解析文本可靠）
-
-    0  成功
-    2  依赖缺失（rapidocr / pymupdf 没装）
-    3  参数错误（文件不存在、页范围非法）
-    4  页数超限
-    5  文件打不开（PDF 损坏/加密，或图片格式不受支持）
-    6  识别结果为空
-    7  未预期的内部错误
+退出码：0 成功 / 2 依赖缺失 / 3 参数错误 / 4 页数超限
+        5 文件打不开 / 6 结果为空 / 7 未预期的内部错误
 
 用法：
-    python qa_ocr.py --check                       # 依赖自检（Java 侧用它判断可用性）
+    python qa_ocr.py --check
     python qa_ocr.py <文件路径> [--max-pages 50] [--dpi 200] [--min-confidence 0.5]
-                               [--detect-images on|off] [--max-images 60]
 """
 
 from __future__ import annotations
@@ -121,23 +74,10 @@ CUDA_ERROR_MARKERS = (
 
 
 class CaptureStderr:
-    """临时把进程 stderr 重定向到文件，退出时可读回内容。
+    """临时把进程 stderr 重定向到文件，退出后可读回内容。
 
-    <h2>为什么需要它（2026-10-14 实测）</h2>
-    GPU 执行失败时 onnxruntime **不抛异常**，只在 stderr 打一行：
-
-        [E:onnxruntime:Default, cuda_call.cc:148 onnxruntime::CudaCall]
-        CUDNN failure 5003: CUDNN_STATUS_EXECUTION_FAILED_CUDART ; GPU=0
-
-    然后照常返回（结果是空的）。于是应用只能看到"这个文件没识别出文字"，
-    而真实原因是"GPU 算不出来"—— 用户和开发者都会被这句话带偏。
-    这里把 stderr 抓下来，作为"空结果"时的证据。
-
-    <h2>两个实现细节</h2>
-      * 用 `os.dup2` 在**文件描述符层**重定向，这样 C/C++ 层写 fd 2 的日志也能抓到
-        （换 `sys.stderr` 只能拦 Python 层的 print）。
-      * 用 `tempfile.mkstemp` 而不是 `TemporaryFile`：Windows 上后者的文件句柄
-        行为有平台差异，`dup2` 到它上面不稳。
+    onnxruntime 的 CUDNN 报错写在 fd 2 上，Python 异常捕获不到；
+    不抓这一段，执行失败会伪装成「结果为空」。
     """
 
     def __init__(self) -> None:
@@ -211,19 +151,7 @@ def emit(payload: dict) -> None:
 
 
 def report(payload: dict, args) -> None:
-    """打一行**进度**（不套哨兵）。
-
-    <h2>为什么不套哨兵</h2>
-    结果只有一个、进度有很多条，两者混在一个协议里迟早出错。现在分工明确：
-      * **哨兵之间** = 最终结果，Java 侧只认这一段（`extractPayload` 用正则截取）；
-      * **哨兵之外** = 进度/诊断，Java 侧按哨兵取结果时天然忽略，一个字都不用改。
-
-    这正是当初选"哨兵包裹"而不是"假设 stdout 全是 JSON"的意外收益（见模块头注释）。
-
-    进度行还有个实际用途：38 页扫描件要跑几十秒，用户在这期间看不到任何反馈，
-    只会以为程序卡死。Java 侧把子进程输出整段读下来，需要时可以从里面挑出进度行。
-    行内带 `"qaProgress": true` 便于识别。
-    """
+    """输出一行进度 JSON（仅在 --progress on 时）。"""
     if getattr(args, "progress", "on") != "on":
         return
     try:
@@ -273,38 +201,10 @@ def check_dependencies() -> int:
 
 
 def _nvidia_dll_dirs() -> list[str]:
-    """找出 pip 安装的 NVIDIA 运行时库目录（`site-packages/nvidia/**` 下的 bin / lib）。
+    """返回 pip 安装的 NVIDIA 库目录：Windows 取 bin，Linux 取 lib。
 
-    <h2>为什么需要这个函数（实测踩出来的坑，别删）</h2>
-    `onnxruntime-gpu` 的 CUDA 版会依赖 `cublasLt64_13.dll`、`cudnn64_9.dll`（Windows）
-    或 `libcublasLt.so.13`、`libcudnn.so.9`（Linux）这些库，它们由
-    `nvidia-cublas` / `nvidia-cudnn-cu13` 等包提供，落在 site-packages 里面 ——
-    **既不在系统 PATH（Windows）也不在默认库搜索路径（Linux）上**。
-
-    于是会出现这个极具迷惑性的现象：包明明装好了、`get_available_providers()`
-    也确实列出了 `CUDAExecutionProvider`，但真正建会话时报
-
-        Error loading "onnxruntime_providers_cuda.dll" which depends on
-        "cublasLt64_13.dll" which is missing. (Error 126)
-        Failed to load library libonnxruntime_providers_cuda.so with error:
-        libcublasLt.so.13: cannot open shared object file
-
-    然后**静默回落到 CPU**（表面看只是"没变快"，不报错）。
-
-    两种常见修法实测**都无效**：
-      * `os.add_dll_directory()` —— onnxruntime 加载 EP 时不走这个搜索路径；
-      * 装完之后再改 PATH —— onnxruntime 在 **import 那一刻**就注册执行器，晚了。
-
-    唯一有效的做法：在 import onnxruntime **之前**把这些目录塞进搜索路径。
-    本模块的 `configure_gpu()` 就是这个时机，且由 `main()` 最早调用。
-
-    <h2>目录布局实测（2026-10 在 RTX 5070 / Ubuntu 22.04 / Python 3.12 上量的）</h2>
-      * Windows：`nvidia/<组件>/bin`、`nvidia/<组件>/bin/x86_64`；
-      * Linux CUDA 13 包：`nvidia/cu13/lib` —— **注意组件名是 `cu13` 而不是包名**，
-        onnxruntime 自带的搜索逻辑只认 CUDA 12 时代的 `nvidia/cublas/lib`，
-        所以这个目录必须由我们显式加进去，否则必然掉回 CPU；
-      * Linux CUDA 12 包：`nvidia/<组件>/lib`。
-    因此 Windows 认 `bin`、Linux 认 `lib`，各取所需；两种布局都扫，兼容新旧包。
+    布局：Windows 为 nvidia/<组件>/bin[/x86_64]；Linux CUDA 13 为 nvidia/cu13/lib
+    （组件名是 cu13），CUDA 12 为 nvidia/<组件>/lib。这些目录不在系统搜索路径上。
     """
     patterns = ("*/bin", "*/bin/x86_64", "*/*/bin", "*/*/bin/x86_64") if os.name == "nt" else \
                ("*/lib", "*/*/lib")
@@ -322,30 +222,11 @@ def _nvidia_dll_dirs() -> list[str]:
 
 
 def _cuda_session_selftest(onnxruntime) -> tuple[bool, str]:
-    """真的建一个 CUDA 会话跑一次，确认 GPU **确实可用**；返回 (是否可用, 说明)。
+    """建一个 CUDA 会话并真跑一次前向，返回 (是否可用, 说明)。
 
-    <h2>为什么非要做这一层（血泪教训，别删）</h2>
-    `get_available_providers()` **不代表 CUDA 真的能用**：它列的是"这个轮子编译时
-    注册了哪些执行器"，而不是"这些执行器的动态库现在能不能被加载"。
-    实测（2026-10，Ubuntu 22.04 / Python 3.12 / onnxruntime-gpu 1.31.0）：
-
-        available providers: ['TensorrtExecutionProvider','CUDAExecutionProvider','CPUExecutionProvider']
-        InferenceSession(..., providers=['CUDAExecutionProvider'])
-        → session.get_providers() == ['CPUExecutionProvider']      # 静默掉回 CPU！
-        stderr: Failed to load libonnxruntime_providers_cuda.so:
-                libcublasLt.so.13: cannot open shared object file
-
-    也就是说：**不报错、不抛异常、只是慢 3 倍**。用户只会觉得"开了 GPU 怎么没变快"。
-    所以这里必须真建会话、真跑一次 forward，用 `session.get_providers()` 的结果说话。
-
-    <h2>模型怎么来的</h2>
-    不依赖 `onnx` 包（那只是构建工具，不该进运行依赖），直接用 protobuf 的
-    动态描述符按 onnx.proto 的字段号手搓一个 97 字节的 `Relu` 单节点模型。
-    字段号：ModelProto{ir_version=1,graph=7,opset_import=8}、GraphProto{node=1,name=2,input=11,output=12}、
-    NodeProto{input=1,output=2,name=3,op_type=4}、ValueInfoProto{name=1,type=2}、
-    TypeProto{tensor_type=1}、TypeProto.Tensor{elem_type=1,shape=2}、TensorShapeProto{dim=1}、Dim{dim_value=1}。
-    实测这套字段号能被 onnxruntime 1.31 正常加载（ir_version=7 / opset=17）。
-    protobuf 本身是 onnxruntime 的硬依赖，一定在，所以不会引入新的缺依赖风险。
+    只查执行器名单或只建会话都不够：实测存在「执行器注册了、库加载了、会话也建起来了，
+    但一跑推理就失败」的机器，浅层自检在那类机器上会假通过。
+    输入含负数，Relu 输出才能与 CPU 结果逐元素比对。
     """
     try:
         import uuid
@@ -477,30 +358,10 @@ def _cuda_session_selftest(onnxruntime) -> tuple[bool, str]:
 
 
 def _preload_cuda_libs(dirs: list[str]) -> tuple[int, list[str]]:
-    """Linux 专用：把 nvidia 目录下的 .so 用 `ctypes.CDLL(..., RTLD_GLOBAL)` 预加载。
+    """把 nvidia 目录下的 .so 以 RTLD_GLOBAL 预加载，返回 (成功数, 失败清单)。
 
-    <h2>为什么不能靠 LD_LIBRARY_PATH（实测结论，别改成只设环境变量）</h2>
-    在 Python 进程里执行 `os.environ["LD_LIBRARY_PATH"] = ...` **完全无效**：
-    LD_LIBRARY_PATH 是**动态链接器在进程启动时**读一次的，程序跑起来之后再改
-    环境变量，链接器不会重新读。实测（Ubuntu 22.04 / Python 3.12 / onnxruntime-gpu 1.31.0）：
-
-        在 shell 里 export LD_LIBRARY_PATH=site-packages/nvidia/*/lib  → GPU_ACTIVE
-        在 Python 里 os.environ["LD_LIBRARY_PATH"]=...                 → 仍报
-            libonnxruntime_providers_cuda.so: libcublasLt.so.13: cannot open shared object file
-
-    Windows 那边没有这个问题，因为 onnxruntime 的 EP 加载**确实**走 PATH
-    （`os.add_dll_directory()` 反倒无效），两边机制不同，别互相套用。
-
-    <h2>为什么 ctypes 预加载有效</h2>
-    用 `RTLD_GLOBAL` 把库 dlopen 进来后，其 SONAME 就登记进了进程的全局符号表，
-    之后 onnxruntime 再 `dlopen("libonnxruntime_providers_cuda.so")` 时，
-    `libcublasLt.so.13` 作为**已加载的 SONAME**被直接复用，不再去磁盘搜索 —— 于是成功。
-    实测：不设任何环境变量，仅预加载 20 个 .so，`session.get_providers()`
-    就从 `['CPUExecutionProvider']` 变成 `['CUDAExecutionProvider','CPUExecutionProvider']`。
-
-    <h2>返回</h2>
-    (成功加载的库数, 失败清单)；失败不致命 —— 脚本正常路径会先 export LD_LIBRARY_PATH，
-    那种情况下这里全部跳过；只有用户"自己 pip 装完直接跑脚本"时才依赖这条兜底。
+    LD_LIBRARY_PATH 在进程启动时已固定，Python 内再设置无效，只能预加载：
+    库的 SONAME 进入进程全局符号表后，onnxruntime 才能复用它们。
     """
     import ctypes
 
@@ -589,16 +450,9 @@ def configure_gpu(use_cuda: bool) -> dict:
 def build_engine_params(gpu_enabled: bool, max_side_len: int, use_cls: bool) -> dict:
     """组装 RapidOCR 的引擎参数。
 
-    <h2>三个参数各自的依据（都是实测值，别凭感觉改）</h2>
-      * `use_cuda`：实测同一份 38 页扫描件，CPU 65.3 s → GPU 20.2 s（**3.2 倍**），
-        识别结果逐页相似度 99.96%（33/38 页完全一致）。
-      * `max_side_len` 2000 → 1280：实测识别耗时 2.21 → 1.55 s/页（**-30%**）而
-        **字数不减反略增**（756→759）。降到 960 会掉字（725），所以 1280 是拐点。
-        它管的是"位图送进检测网络前压到多长边"，200 DPI 的 A4 是 1654×2481，
-        压到 1280 后检测网络负担明显下降。
-      * `use_cls=False`：关闭文本行方向分类（判断是否 180° 倒置）。本项目处理的
-        都是正立扫描件，这步是白跑，实测省约 7%。**代价**：倒置/横向的扫描件可能识别不出，
-        文档里已写明"请先把扫描件转正"。
+    use_cuda：GPU 实测比 CPU 快 3.2 倍，识别结果逐页相似度 99.96%。
+    max_side_len=1280：比 2000 快 30% 且不丢字，降到 960 会开始掉字。
+    use_cls=False：处理的都是正立扫描件，方向分类是白跑。
     """
     params = {
         "Global.max_side_len": int(max_side_len),
@@ -659,29 +513,7 @@ IMAGE_DUP_RATIO = 0.7
 
 
 def render_image(doc, xref, min_side, min_pixels):
-    """把 PDF 内嵌图片渲染成识别用的 PNG 字节。
-
-    <h2>为什么小图要放大</h2>
-    内嵌图片的分辨率差异极大：一张 30000×2000 的长截图直接丢给识别引擎既慢又容易被
-    内部缩放糊掉；一张 150×120 的小图则字太细、检测不到。所以按"长边"归一：
-    长边不足 {@link TARGET_RENDER_SIDE} 的图放大到该尺寸附近，够大的图原样使用。
-
-    <h2>为什么用"临时页重绘"而不是 Pixmap 自己的缩放</h2>
-    PyMuPDF 1.28 的 {@code Pixmap} 没有通用的重采样接口 —— 实测：
-      * {@code pix * Matrix}  → TypeError（Pixmap 不支持与 Matrix 相乘）
-      * {@code pix.warp(Matrix, w, h)} → AttributeError（要求 Quad，不是 Matrix）
-      * {@code pix.warp(Quad(...), w, h)} → ValueError: quad must be convex
-      * {@code pix.shrink(n)}  → 只能整数倍**缩小**，且放大时返回 None
-    最可靠的通用做法是：把图插进一个临时页，再用 {@code get_pixmap(matrix=...)}
-    按任意倍率渲染 —— 这条路径是 MuPDF 自己的渲染器，缩放质量也最好。
-    代价是每张图多一次内存渲染，相对识别本身的耗时可以忽略。
-
-    @param doc        PyMuPDF 文档
-    @param xref       图片对象号
-    @param min_side   任一边小于此像素 → 判为图标/装饰，返回 None
-    @param min_pixels 总面积小于此 → 同样跳过
-    @return PNG 字节，或 None（尺寸不达标 / 读取失败）
-    """
+    """把 PDF 内嵌图片渲染成待识别用的 PNG 字节。"""
     import pymupdf
 
     try:
@@ -740,30 +572,7 @@ def recognize_bitmap(engine, png_bytes, min_confidence):
 
 
 def image_covers_page(page, xref, ratio_threshold: float) -> bool:
-    """判断这张内嵌图是不是"整页扫描图"（铺满整个页面）。
-
-    <h2>为什么必须判这个（实测数据，省下一半时间）</h2>
-    扫描件 PDF 的典型结构是：**每页一张大图，就是这一页的扫描件本身**，
-    页面上没有别的元素。实测用户那份 38 页 PDF：每页 1 张 1190×1683 的图，
-    在页面上占 **100%** 面积。
-
-    这种情况下"逐页渲染 + 识别"（主流程）已经把整页内容完整读过了，
-    再把这些图抽出来放大识别一遍是**纯重复劳动** —— 实测那一遍花了 **62 秒
-    （占 46% 时间）**，而 38 张里 **37 张被判重丢弃、只有 1 张真有字**，
-    最终字数只差 3%（24,954 vs 25,745）。GPU 下这一遍同样要花约 17 秒。
-
-    <h2>为什么不能干脆关掉内嵌图识别</h2>
-    这条通道是为**另一种情况**存在的：正文是文字层，中间插了一张小截图/表格照片，
-    整页渲染时那部分字太细检测不到（详见 extract_page_images 的注释）。
-    那种图**只占页面一小块**，不会达到这里 80% 的阈值。
-
-    所以判据是"占页面多大"而不是"要不要识别" —— **能力一点没减，只是不再对自己重复**。
-
-    @param page            PyMuPDF 页面
-    @param xref            图片对象号
-    @param ratio_threshold 面积占比阈值，超过即判为整页图
-    @return True 表示这是整页图，应跳过单独识别
-    """
+    """判断内嵌图是否就是整页扫描图。整页图会跳过，避免与页面识别重复。"""
     try:
         page_area = page.rect.width * page.rect.height
         if page_area <= 0:
@@ -783,26 +592,9 @@ def image_covers_page(page, xref, ratio_threshold: float) -> bool:
 
 
 def extract_page_images(doc, engine, args, page_texts_by_index=None):
-    """抽取内嵌图片并识别其中的文字，**丢掉与整页结果重复的部分**。
+    """识别内嵌图片里的文字，丢弃与页面结果重复的部分。
 
-    <h2>为什么需要这一步</h2>
-    主流程是"整页渲染 → 文字检测"。实测在 200 DPI 下它通常已经能读出页面上
-    插图里的字；但有两种情况会漏：
-      * 图很小或被缩放过，整页渲染后那部分字太细，检测不到；
-      * 页面主体是模糊扫描件（低对比、倾斜），而插在其中的截图反而清晰。
-    这时按图单独抽出来识别，才能把那部分文字捞回来。
-
-    <h2>三道过滤，各有各的依据</h2>
-    1. **尺寸过滤**（min_image_side / min_image_pixels）：图标、logo、分隔线不是内容。
-    2. **整页图过滤**（`--page-image-ratio`，新增）：图占页面 ≥80% 面积时，
-       它就是这一页的扫描件，主流程刚读过 —— 见 image_covers_page 的实测数据。
-       这一道把"扫描件 PDF"的时间砍掉近一半。
-    3. **内容判重**（IMAGE_DUP_RATIO）：即便通过了前两道，图里识别出的行若大多
-       已出现在该页整页结果里，整块丢弃。**这一道是兜底，不是主力** ——
-       实测它在扫描件上要"识别完才发现是重复"，钱已经花掉了。
-
-    @param page_texts_by_index 页码 → 该页整页识别文本（用于去重）
-    @return (图片段落列表, 纳入识别的图片数, 其中有文字的图片数, 置信度列表, 去重丢弃数)
+    返回 (文本块列表, 参与识别数, 有文字数, 置信度列表, 重复数)。
     """
     page_texts_by_index = page_texts_by_index or {}
     blocks: list[str] = []

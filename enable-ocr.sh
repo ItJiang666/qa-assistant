@@ -1,31 +1,15 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  enable-ocr.sh —— qa-assistant「扫描版 PDF 识别文字」的 CPU 版一键安装
+#  enable-ocr.sh —— 装「扫描版 PDF 识别文字」的 CPU 版依赖
 # ============================================================================
-#  什么时候用这个：
-#    * 你没有 NVIDIA 显卡，或者不打算用 GPU；
-#    * 你只想让"扫描件 / 图片识别文字"这一项功能可用，不想要 1 GB 的
-#      CUDA 运行库。
+#  bash enable-ocr.sh            安装
+#  bash enable-ocr.sh --check    只打印将要做的事，不安装
 #
-#  它只装三个包（约 50 MB，其中模型随包下发、装完即离线可用）：
-#      rapidocr     真正认字的引擎（PP-OCR 系列）
-#      onnxruntime  它的推理后端（CPU 版）
-#      pymupdf      把 PDF 逐页渲染成位图
+#  装三个包（约 50 MB）：rapidocr 认字、onnxruntime 推理后端（CPU 版）、
+#  pymupdf 把 PDF 逐页渲染成位图。模型随 pip 包下发，装完即离线可用。
+#  想要 GPU 加速用 enable-gpu.sh。
 #
-#  ⚠️ 与 `pip install -r deploy/ocr/requirements.txt` 的区别：
-#    两者装的东西**完全一样**，这个脚本只是多了环境检测与自检 —— 它会
-#    跳过不可用的 Python、打印将要修改的解释器绝对路径、装完验证三个包都能
-#    import（与应用的真实判定标准一致）。requirements.txt 那条路依然可用。
-#
-#  用法：
-#    bash enable-ocr.sh            # 安装
-#    bash enable-ocr.sh --check    # 只看它打算做什么，不安装
-#
-#  想要 GPU 加速？用 enable-gpu.sh（它会先装这三个、再装 GPU 运行库）。
-#
-#  实现说明：本脚本 **复用 enable-gpu.sh 的函数**而不是复制一份逻辑 ——
-#  两份实现迟早会漂移（改了 A 忘了 B），而 Python 探测、环境确认这两段
-#  是最不该漂移的。所以这里把 PRE 预置为 1 再调用同一个 install_baseline()。
+#  本脚本复用 enable-gpu.sh 的 find_python / install_baseline，避免两份实现漂移。
 # ============================================================================
 
 set -u
@@ -41,12 +25,12 @@ fi
 # shellcheck source=enable-gpu.sh
 . "$HERE/enable-gpu.sh"
 
-# 解析本脚本自己的用法：只支持 --check
+# 只支持 --check / --help
 for arg in "$@"; do
   case "$arg" in
     --check) PRE=1 ;;
     -h|--help)
-      sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -66,27 +50,17 @@ if ! find_python; then
   echo "    可选功能：不装它，问答、上传、检索全都不受影响。"
   exit 1
 fi
-PYM=${PYVER%%.*}
-PYN=${PYVER#*.}
-if [ "$PYM" -lt 3 ] || { [ "$PYM" -eq 3 ] && [ "$PYN" -lt 10 ]; }; then
+if python_too_old; then
   echo "[X] Python $PYVER 太旧，OCR 依赖需要 3.10 或更新。"
   exit 1
 fi
-echo "[1/3] Python：$PYVER（$PYARCH）"
-confirm_target || exit 0
+echo "[1/3] Python：$PYVER（$PYARCH），目标解释器：$PY"
 
 # ---- 2. 安装三个包 ----------------------------------------------------------
 echo "[2/3] 安装 OCR 依赖..."
 
-# ⚠️ 守卫：绝不降级已装的 GPU 版
-#
-#   实测踩到过，而且真的弄坏了一台机器：`pip install onnxruntime` 装的是 **CPU 分发**，
-#   而它的文件与 `onnxruntime-gpu` 落在**同一个目录**（两者都 import 成 onnxruntime）。
-#   pip 把两者记成**两个独立分发**，于是它会开开心心把 CPU 版盖上去 ——
-#   `CUDAExecutionProvider` 就此消失，**GPU 加速被静默关掉，任何地方都不报错**。
-#
-#   所以：只要检测到 onnxruntime-gpu，就**完全不提 onnxruntime 这个名字** ——
-#   现有的 GPU 版已经满足了 rapidocr 的那条依赖。
+# 已装 onnxruntime-gpu 时不提 onnxruntime 这个名字：两者文件同目录、pip 记成
+# 两条独立分发，装 CPU 版会覆盖 GPU 版并静默关掉 GPU 加速。
 HAS_GPU=""
 if "$PY" -m pip list 2>/dev/null | grep -qi '^onnxruntime-gpu'; then
   HAS_GPU=1
@@ -119,7 +93,7 @@ else
 fi
 echo
 
-# ---- 3. 自检（与应用的真实判定标准一致：三个包都要能 import）---------------
+# ---- 3. 自检：三个包都要能 import -------------------------------------------
 echo "[3/3] 自检..."
 if [ -n "$PRE" ]; then
   echo "      --check：跳过自检。"

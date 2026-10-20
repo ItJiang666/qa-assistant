@@ -3,11 +3,9 @@ setlocal enabledelayedexpansion
 
 rem ============================================================================
 rem  qa-assistant 发布包构建（Windows）
-rem
 rem  产物：release\qa-assistant-<版本>.zip 与同名 .sha256
-rem  包里只有"跑起来需要的东西"，且**不含** .env / target 源码 / node_modules。
-rem
-rem  ?? 本文件必须以 GBK(936) 保存（原因同 start.cmd）。
+rem  只打包运行所需文件，不含 .env / 源码 / node_modules。
+rem  本文件必须以 GBK(936) 保存（原因同 start.cmd）。
 rem ============================================================================
 
 cd /d "%~dp0"
@@ -41,11 +39,7 @@ if not defined UI_FOUND (
     echo     先执行：cd web ^&^& pnpm build   然后重新 mvn clean package
     goto :fail
 )
-rem ---------- 2b) front-end asset self-check (no missing, no orphans) ----------
-rem Why: vite renames bundles every build, and Maven's incremental build does not
-rem clean stale files out of target\classes, so the previous index-xxx.js rides
-rem along into the jar -- the package would then contain two front-ends. The
-rem logic lives in tools\check-ui-assets.ps1 so there is no quote nesting here.
+rem ---------- 2b) 前端资产自检：引用集合必须等于实际集合（抓到孤儿文件）----------
 set "BAD_UI="
 powershell -NoProfile -ExecutionPolicy Bypass -File "tools\check-ui-assets.ps1" "!JAR!"
 if errorlevel 1 set "BAD_UI=1"
@@ -80,11 +74,7 @@ copy /y "deploy\ollama\Modelfile.qa-embed" "!STAGE!\deploy\ollama\" >nul
 copy /y "deploy\ocr\qa_ocr.py" "!STAGE!\deploy\ocr\" >nul
 copy /y "deploy\ocr\requirements.txt" "!STAGE!\deploy\ocr\" >nul
 
-rem  qa_gpu_probe.py must ship too: enable-gpu.cmd/.sh call it to try each
-rem  CUDA tier in an ISOLATED temp venv and accept one only after a REAL
-rem  forward pass (relu output vs CPU). Measured on a clean machine: the old
-rem  flow reported success while every page OCRed to nothing, because its
-rem  self-test only built a session and never ran inference.
+rem  qa_gpu_probe.py：enable-gpu.cmd/.sh 用它做真实前向验证，缺了就无法验证 GPU。
 copy /y "deploy\ocr\qa_gpu_probe.py" "!STAGE!\deploy\ocr\" >nul
 
 rem 防止误发：.env 绝不能进包（哪怕它存在于工作目录）

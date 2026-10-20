@@ -3,18 +3,10 @@ setlocal enabledelayedexpansion
 
 rem ============================================================================
 rem  qa-assistant 一键启动（Windows）
-rem
-rem  这个脚本刻意只做"体检 + 启动"，不自动拉模型：
-rem    ollama pull qwen3.5:9b 是 8.5 GB 下载，不能藏在"双击启动"背后偷偷跑。
-rem  它会把该执行的命令打印出来，由用户自己决定什么时候拉。
-rem
-rem  ?? 本文件必须以 **GBK(936)** 保存：cmd.exe 按系统 ANSI 代码页解析 .cmd，
-rem     存成 UTF-8 会让中文注释变成乱码命令并直接报错。
-rem     同理不要在这里 chcp 65001 —— 控制台本来就是 936，切过去反而更乱。
-rem
-rem  无参双击即可运行；也支持：
-rem    start.cmd 8081        指定端口
-rem    start.cmd --port 8081 同上
+rem    start.cmd              默认 8080
+rem    start.cmd 8081         指定端口
+rem  只做体检 + 启动；不自动拉模型（ollama pull 是 8.5 GB 下载）。
+rem  本文件必须以 GBK(936) 保存：cmd.exe 按系统 ANSI 代码页解析 .cmd。
 rem ============================================================================
 
 cd /d "%~dp0"
@@ -28,11 +20,8 @@ if not "%~1"=="" (
     )
 )
 
-rem ---------- 端口自检 ----------
-rem 为什么加：端口被占时 Spring 会抛一屏异常栈，用户看到 "Web server failed to start"，
-rem 完全不知道真实原因是"已经有一个实例在跑"。这里在启动前先探一次。
-rem 用 netstat 而不是 PowerShell 的 Get-NetTCPConnection：netstat 的输出是英文固定
-rem 格式，不受代码页影响，解析可靠；进程名交给 tasklist，已 chcp 65001。
+rem ---------- 端口自检：被占用时直接说明是哪个实例 ----------
+rem netstat 的输出是英文固定格式，不受代码页影响；进程名交给 tasklist。
 set "PORT_PID="
 for /f "tokens=5" %%p in ('netstat -ano ^| findstr /r /c:"LISTENING" ^| findstr /r /c:":%PORT% "') do set "PORT_PID=%%p"
 if defined PORT_PID (
@@ -94,8 +83,7 @@ if not defined JAR (
 )
 echo [OK] 找到程序包: !JAR!
 
-rem 校验 jar 里是否带前端产物 —— 缺了会打开一个空白页，这比启动失败更难排查。
-rem 用 JDK 自带的 jar 命令而不是 PowerShell 解压：前者是硬前提，且不用引号/通配符的坑。
+rem 校验 jar 里是否带前端产物 —— 缺了会打开一个空白页。
 set "UI_FOUND="
 for /f "delims=" %%l in ('jar tf "!JAR!" 2^>nul ^| findstr /c:"BOOT-INF/classes/static/index.html"') do (
     set "UI_FOUND=1"

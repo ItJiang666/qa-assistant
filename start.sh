@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
 # ============================================================================
 #  qa-assistant 一键启动（Linux / macOS）
-#
-#  与 start.cmd 行为一致，只做"体检 + 启动"，不自动拉模型：
-#    ollama pull qwen3.5:9b 是 8.5 GB 下载，不能藏在"一条命令"背后偷偷跑。
-#
-#  用法：
 #    ./start.sh            # 默认 8080
 #    ./start.sh 8081       # 指定端口
-#    ./start.sh --port 8081
+#  只做体检 + 启动；不自动拉模型（ollama pull 是 8.5 GB 下载）。
 # ============================================================================
 set -uo pipefail
 
@@ -98,10 +93,7 @@ else
   echo "    cp .env.example .env 然后填入 Key，再重新运行本脚本。"
 fi
 
-# ---------- 4.5) 云端模式预检 ----------
-# 起因：QA_MODE=cloud 但缺 Key 时，应用会在装配期抛异常直接退出，
-# 用户看到的是一大串 Spring bean 堆栈（实测：缺少 SILICONFLOW_API_KEY）。
-# 这里提前判断，用一句话说清"缺什么、怎么办"。
+# ---------- 4.5) 云端模式预检：缺 Key 时给出可操作的提示 ----------
 MODE_VALUE="${QA_MODE:-}"
 if [ -z "$MODE_VALUE" ] && [ -f .env ]; then
   MODE_VALUE="$(grep -E '^[[:space:]]*QA_MODE=' .env | tail -n 1 | cut -d= -f2- | tr -d '[:space:]')"
@@ -140,10 +132,7 @@ if [ "$OLLAMA_OK" = "1" ]; then
   echo "    装完刷新页面按钮才会亮；不装不影响问答、上传、检索。"
 fi
 
-# ---------- 4.6) 端口自检 ----------
-# 为什么加：端口被占时 Spring 会抛一屏异常栈，用户看到的是
-# "Web server failed to start"，完全不知道真实原因是"已经有一个实例在跑"。
-# 这里在启动前先探一次，给一句能照做的话。
+# ---------- 4.6) 端口自检：被占用时直接说明是哪个实例 ----------
 PORT_PID=""
 if command -v ss >/dev/null 2>&1; then
   PORT_PID="$(ss -lntp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p"$" {print $NF}' | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -n 1)"

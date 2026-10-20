@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 # ============================================================================
 #  qa-assistant 发布包构建（Linux / macOS）
-#
 #  产物：release/qa-assistant-<版本>.zip 与同名 .sha256
-#  包里只有"跑起来需要的东西"，且**不含** .env / target 源码 / node_modules。
-#
-#  需要 zip 命令；没有的话会给出提示（Debian/Ubuntu: apt install zip）。
+#  只打包运行所需文件，不含 .env / 源码 / node_modules。需要 zip 命令。
 # ============================================================================
 set -uo pipefail
 
@@ -42,11 +39,7 @@ if ! $CHECK_CMD "$JAR" 2>/dev/null | grep -q 'BOOT-INF/classes/static/index.html
 fi
 echo "[OK] 已确认程序包内含前端页面"
 
-# ---------- 2b) 前端资产自检：不缺引用、不留孤儿 ----------
-# 为什么需要：vite 每次构建换文件名（带内容哈希），而 Maven 增量构建**不会清理**
-# target/classes 里的旧文件，于是上一版的 index-xxx.js 会跟着新版本一起进 jar ——
-# 后果不只是体积：旧 bundle 仍可按 URL 访问，等于包里同时存在两个版本的前端。
-# 判据必须是"引用集合 == 实际集合"：只查 index.html 引用的是否存在，抓不到孤儿。
+# ---------- 2b) 前端资产自检：引用集合必须等于实际集合（抓到孤儿文件）----------
 python3 - "$JAR" <<'PY'
 import re, sys, zipfile
 jar = sys.argv[1]
@@ -99,10 +92,7 @@ cp docs/ACCEPTANCE.md "$STAGE/docs/"
 cp deploy/ollama/Modelfile.qa-embed "$STAGE/deploy/ollama/"
 cp deploy/ocr/qa_ocr.py            "$STAGE/deploy/ocr/"
 cp deploy/ocr/requirements.txt     "$STAGE/deploy/ocr/"
-#  GPU 运行库 1~1.5 GB，实测各源吞吐差约 18 倍（4.31 MB/s vs 0.24 MB/s），
-#  少了它脚本只能退回官方源，慢网下等于装不完。
-#  qa_gpu_probe.py：enable-gpu.sh 用它做「隔离试装 + 真实前向验证」，
-#  通过的组合才落地 —— 少了它脚本会退回旧的浅自检（会假通过）。
+#  qa_gpu_probe.py：enable-gpu.sh 用它做真实前向验证，缺了就无法验证 GPU。
 cp deploy/ocr/qa_gpu_probe.py       "$STAGE/deploy/ocr/"
 
 chmod +x "$STAGE/start.sh" "$STAGE/enable-gpu.sh" "$STAGE/enable-ocr.sh"

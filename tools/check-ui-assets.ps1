@@ -1,20 +1,12 @@
-# check-ui-assets.ps1 — verify that the front-end assets inside the packaged jar are
-# exactly the ones index.html references: none missing, none orphaned.
+# check-ui-assets.ps1 — verify the front-end assets inside the packaged jar match
+# what index.html references: nothing missing, nothing orphaned.
 #
 #   usage: powershell -NoProfile -ExecutionPolicy Bypass -File tools\check-ui-assets.ps1 <jar>
 #   exit : 0 = clean, 1 = problem, 2 = usage / jar unreadable
 #
-# Why this exists (measured, not hypothetical): vite names bundles with a content
-# hash, so every build produces a new file name. Maven's incremental build does NOT
-# clean stale files out of target\classes, so the previous index-xxx.js gets copied
-# into the jar alongside the new one. That is not merely dead weight -- the stale
-# bundle stays reachable by URL, so the shipped package would contain two versions
-# of the front-end. The check must compare the two SETS; only verifying that what
-# index.html references exists would silently pass an orphan.
-#
-# NOTE: this file is deliberately ASCII-only. PowerShell 5.1 reads a BOM-less .ps1
-# as ANSI, so CJK literals here would be decoded into mojibake (and have broken
-# parsing before). English messages are fine for a build-time tool.
+# Compares the two SETS: checking only that referenced files exist would pass an
+# orphan left behind by Maven's incremental build (vite renames bundles per build).
+# Keep this file ASCII-only: PowerShell 5.1 reads a BOM-less .ps1 as ANSI.
 
 param([Parameter(Mandatory = $true)][string]$Jar)
 

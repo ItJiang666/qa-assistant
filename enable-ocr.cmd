@@ -1,31 +1,20 @@
 @echo off
 setlocal EnableDelayedExpansion
 rem ===========================================================================
-rem  enable-ocr.cmd  --  one-click setup for scanned-PDF text recognition (CPU)
+rem  enable-ocr.cmd -- install the CPU OCR stack for scanned-PDF recognition
 rem ===========================================================================
-rem  WHEN TO USE THIS
-rem    * You have no NVIDIA GPU, or you do not want the ~1 GB CUDA runtime;
-rem    * You only want the "read text from scanned PDFs / images" feature.
+rem  Installs three packages (~50 MB; models ship inside the wheel, so OCR
+rem  works offline afterwards):
+rem      rapidocr      the recognizer (PP-OCR)
+rem      onnxruntime   inference backend (CPU build)
+rem      pymupdf       rasterizes PDF pages
 rem
-rem  It installs exactly three packages (~50 MB; models ship inside the wheel,
-rem  so OCR works fully offline afterwards):
-rem      rapidocr      the actual recognizer (PP-OCR family)
-rem      onnxruntime   its inference backend (CPU build)
-rem      pymupdf       rasterizes PDF pages to bitmaps
+rem  Equivalent to `pip install -r deploy\ocr\requirements.txt`, plus
+rem  interpreter checks and a post-install import check.
+rem  For GPU acceleration use enable-gpu.cmd instead.
 rem
-rem  NOTE: difference from `pip install -r deploy\ocr\requirements.txt`:
-rem     This installs the SAME three packages. The script just adds environment
-rem     checks -- it skips unusable Python interpreters, prints the absolute path
-rem     of the environment it is about to modify, and verifies afterwards that all
-rem     three packages import (the same criterion the application itself uses).
-rem     The requirements.txt route still works fine.
-rem
-rem  Want GPU acceleration instead? Use enable-gpu.cmd -- it installs these three
-rem  first and then adds the GPU runtime.
-rem
-rem  NOTE: this file must stay pure ASCII + CRLF. cmd.exe reads .cmd files using
-rem  the system code page (GBK on Chinese Windows), so UTF-8 Chinese text inside
-rem  would be decoded as garbage and can break parsing.
+rem  Keep this file pure ASCII + CRLF: cmd.exe reads .cmd files in the system
+rem  code page (GBK on Chinese Windows), so UTF-8 text would be mis-decoded.
 rem ===========================================================================
 
 set "PY="
@@ -38,11 +27,7 @@ echo   qa-assistant  -  enable scanned-document OCR (CPU mode)
 echo ============================================================
 echo.
 
-rem ---- 1. find a WORKING python ---------------------------------------------
-rem  Verified by actually running it: on Windows with the Store build of Python
-rem  installed, PATH contains a WindowsApps\python3.exe redirect stub that
-rem  `where` finds but cannot execute. Picking it blind would make this script
-rem  claim "no Python found" on a machine that clearly has one.
+rem 1. find a python that actually runs (skips the Store redirect stub)
 set "PY="
 call :try_python "py" "-3"
 if not defined PY call :try_python "python" ""
@@ -56,28 +41,12 @@ for /f "delims=" %%v in ('!PY! -c "import sys;print(sys.executable)" 2^>nul') do
 echo [1/3] Python : !PYVER!
 echo       target : !PYPATH!
 
-rem  Python 3.10+ is what the OCR dependencies require.
 if !PYM! LSS 3 goto :old_python
 if !PYM! EQU 3 if !PYN! LSS 10 goto :old_python
 
-rem  Show WHICH environment is about to change and let the user back out.
-set /p "ANS=      Install into THIS environment? [Y/n] "
-if /i "!ANS!"=="n" (
-  echo [i] Cancelled. Nothing was changed.
-  goto :end
-)
-
-rem ---- 2. GUARD: never downgrade an existing GPU install ---------------------
-rem  MEASURED PROBLEM (this actually broke a machine while testing):
-rem  `pip install onnxruntime` installs the CPU distribution, whose files land in
-rem  the SAME directory as onnxruntime-gpu (both import as `onnxruntime`). pip
-rem  records them as two separate distributions, so it cheerfully installs the
-rem  CPU wheel on top -- and CUDAExecutionProvider disappears. GPU acceleration
-rem  is silently gone, with no error anywhere.
-rem
-rem  So: if onnxruntime-gpu is present, do NOT name onnxruntime at all.
-rem  rapidocr / pymupdf get installed separately, which needs no onnxruntime
-rem  argument (the existing GPU build already satisfies that dependency).
+rem 2. never install the CPU build when onnxruntime-gpu is present: they share
+rem the same directory, so the CPU wheel would overwrite it and silently
+rem disable GPU acceleration
 set "HASGPU="
 set "SKIP_ORT="
 for /f "delims=" %%v in ('%PY% -m pip list 2^>nul ^| findstr /b /c:"onnxruntime-gpu"') do set "HASGPU=1"
@@ -91,7 +60,7 @@ if defined HASGPU (
   echo     Installing the remaining OCR baseline ^(rapidocr, pymupdf^) only.
 )
 
-rem ---- 3. install the packages ----------------------------------------------
+rem 3. install
 echo.
 if defined SKIP_ORT (
   echo [2/3] Installing rapidocr, pymupdf...
@@ -111,7 +80,7 @@ if errorlevel 1 (
   goto :fail
 )
 
-rem ---- 3. verify (same criterion the application uses) ----------------------
+rem 4. verify with the same criterion the application uses
 echo.
 echo [3/3] Verifying...
 %PY% -c "import importlib.util as u;print('OK' if all(u.find_spec(n) for n in ('rapidocr','onnxruntime','pymupdf')) else 'NO')"
@@ -140,15 +109,9 @@ goto :end
 echo [X] Python !PYVER! is too old. The OCR stack needs Python 3.10 or newer.
 goto :fail
 
-rem ---------------------------------------------------------------------------
-rem  :try_python <exe> <extra-args>
-rem  Probe one candidate. Sets PY / PYVER / PYM / PYN only when it actually
-rem  executes and reports something that looks like a version.
-rem
-rem  NOTE: do NOT put a percent-format such as "%d.%d" into the -c string --
-rem  cmd treats a bare % specially and eats it (measured: every candidate then
-rem  looked broken). Take the plain version string and cut the fields in batch.
-rem ---------------------------------------------------------------------------
+rem :try_python <exe> [extra arg] -- sets PY/PYVER/PYM/PYN only when it runs.
+rem Do not put a percent-format such as "%d.%d" in the -c string: cmd would eat
+rem the bare % and every candidate would look broken.
 :try_python
 where %~1 >nul 2>&1 || exit /b 0
 set "CAND=%~1 %~2"
